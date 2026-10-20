@@ -1,0 +1,43 @@
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+
+from .backend_app import BackendApplication
+from .logging_setup import configure_logging
+from .paths import TerminalPaths
+from .websocket_server import HOST, PORT, TerminalWebSocketServer
+
+
+async def run_backend() -> None:
+    # Direct backend startup must not expose an unauthenticated local server.
+    token = os.environ.get("G3_WS_TOKEN", "")
+    if len(token) < 32:
+        raise RuntimeError("G3_WS_TOKEN is required for standalone backend startup")
+    paths = TerminalPaths.from_environment().ensure()
+    configure_logging(paths.logs)
+    builtin_themes = Path(__file__).resolve().parent.parent / "g3_frontend" / "themes"
+    app = BackendApplication(paths, builtin_theme_root=builtin_themes)
+    app.initialize()
+    app.start_background_tasks()
+    server = TerminalWebSocketServer(app.handle_command, host=HOST, port=PORT, token=token)
+    app.set_event_sink(server.broadcast)
+    await server.start()
+    try:
+        await asyncio.Future()
+    finally:
+        await server.close()
+        await app.close_background_tasks()
+
+
+def main() -> int:
+    try:
+        asyncio.run(run_backend())
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

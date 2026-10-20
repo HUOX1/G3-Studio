@@ -1,0 +1,33 @@
+{
+  "id": "classic_cyan",
+  "name": "Classic Cyan",
+  "colors": {
+    "base_top": "#106375",
+    "base_bottom": "#062B39",
+    "accent": "#39D8C5",
+    "accent_secondary": "#4AB7FF",
+    "wave_a": "#52DFD3",
+    "wave_b": "#5FB8F0",
+    "symbol": "#C0EBED",
+    "text": "#ECFFFF",
+    "muted_text": "#8FC4CB"
+  },
+  "ambient": {
+    "wave_speed": 0.52,
+    "wave_strength": 0.85,
+    "symbol_amount": 48,
+    "symbol_opacity": 0.40,
+    "glow_strength": 0.0,
+    "particle_amount": 0
+  },
+  "audio": {
+    "music": "",
+    "music_volume": 0.35,
+    "loop": true,
+    "fade_in_ms": 900,
+    "fade_out_ms": 500,
+    "preview_ducking": 0.3
+  },
+  "icons": { "set": "" },
+  "transitions": { "speed": 1.0 }
+}

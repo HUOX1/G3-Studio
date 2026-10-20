@@ -1,0 +1,32 @@
+shader_type canvas_item;
+
+uniform vec4 top_color : source_color = vec4(0.14, 0.16, 0.19, 1.0);
+uniform vec4 bottom_color : source_color = vec4(0.06, 0.07, 0.085, 1.0);
+uniform vec4 glow_color : source_color = vec4(0.42, 0.55, 0.72, 1.0);
+uniform float glow_amount : hint_range(0.0, 0.5) = 0.10;
+uniform float glow_pos_y : hint_range(0.0, 1.0) = 0.15;
+uniform float grain_amount : hint_range(0.0, 0.05) = 0.012;
+
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void fragment() {
+	vec2 uv = UV;
+
+	// 垂直渐变（顶部略亮 → 底部深）
+	vec3 col = mix(bottom_color.rgb, top_color.rgb, 1.0 - uv.y);
+
+	// 顶部中央一团柔和氛围光
+	vec2 glow_center = vec2(0.5, glow_pos_y);
+	float d = length((uv - glow_center) * vec2(1.0, 0.75));
+	float glow = exp(-d * 2.2);
+	col += glow_color.rgb * glow * glow_amount;
+
+	// 极细噪点（静态，不运动）
+	vec2 grain_uv = uv * vec2(1920.0, 1080.0);
+	float g = hash(floor(grain_uv)) - 0.5;
+	col += vec3(g) * grain_amount;
+
+	COLOR = vec4(col, 1.0);
+}

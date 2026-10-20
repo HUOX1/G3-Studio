@@ -1,0 +1,16 @@
+[configuration]
+
+entry_symbol = "godot_animated_image_init"
+compatibility_minimum = "4.3"
+reloadable = true
+
+[libraries]
+
+windows.debug.x86_64 = "godot_animated_image.windows.template_debug.x86_64.dll"
+windows.release.x86_64 = "godot_animated_image.windows.template_release.x86_64.dll"
+
+[icons]
+
+GIFTexture = "icons/GIFTexture.svg"
+GIFPlayer = "icons/GIFPlayer.svg"
+AnimatedImagePlayer = "icons/AnimatedImagePlayer.svg"
