@@ -13,7 +13,7 @@ const LONG_PRESS_SECTIONS: Array[String] = ["MOVIES"]
 
 const CONTENT_SECTIONS: Array[Dictionary] = [
 	{"id":"GAMES", "tip":"游戏"}, {"id":"MOVIES", "tip":"电影"},
-	{"id":"COMICS", "tip":"空间展厅（实验）"}, {"id":"MUSIC", "tip":"音乐"},
+	{"id":"COMICS", "tip":"空间展厅（实验）"}, {"id":"MUSIC", "tip":"游戏藏品室（实验）"},
 ]
 const SYSTEM_SECTIONS: Array[Dictionary] = [
 	{"id":"SYSTEM", "tip":"系统"},

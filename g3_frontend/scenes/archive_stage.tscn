@@ -1,0 +1,9 @@
+[gd_scene format=3]
+
+[node name="ArchiveStage" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+fov = 32.0
+near = 0.1
+far = 100.0
+current = true

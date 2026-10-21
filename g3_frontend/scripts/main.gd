@@ -15,6 +15,7 @@ const GAME_PASTE_IMPORT_DIALOG_SCRIPT: Script = preload("res://scripts/game_past
 const MOVIE_WALL_SCRIPT: Script = preload("res://scripts/movie_wall.gd")
 const GAME_SECTION_SCRIPT: Script = preload("res://scripts/game_section.gd")
 const SPATIAL_GALLERY_SCRIPT: Script = preload("res://scripts/spatial_gallery.gd")
+const ARCHIVE_GALLERY_SCRIPT: Script = preload("res://scripts/archive_gallery.gd")
 const MOVIE_CREATE_DIALOG_SCRIPT: Script = preload("res://scripts/movie_create_dialog.gd")
 const MOVIE_MANAGE_MENU_SCRIPT: Script = preload("res://scripts/movie_manage_menu.gd")
 const MOVIE_BLANK_MENU_SCRIPT: Script = preload("res://scripts/movie_blank_menu.gd")
@@ -45,7 +46,7 @@ const GAME_PLATFORMS: Array[String] = [
 	"MD", "SS", "DC",
 	"Arcade", "其他",
 ]
-const XMB_SECTION_LABELS: Array[String] = ["游戏", "电影", "空间展厅", "音乐", "系统"]
+const XMB_SECTION_LABELS: Array[String] = ["游戏", "电影", "空间展厅", "游戏藏品室", "系统"]
 const RUNTIME_MESSAGE_HOLD_SECONDS: float = 4.0
 const RUNTIME_MESSAGE_FADE_SECONDS: float = 0.35
 
@@ -96,6 +97,7 @@ var _game_ambient_material: ShaderMaterial
 var movie_wall
 var game_section = null
 var spatial_gallery = null
+var archive_gallery = null
 var game_blank_menu
 var game_create_dialog
 var game_paste_import_dialog
@@ -546,6 +548,11 @@ func _build_3d_world() -> void:
 	collection_world.add_child(spatial_gallery)
 	spatial_gallery.configure(camera)
 	spatial_gallery.game_double_clicked.connect(_on_game_double_clicked)
+	archive_gallery = ARCHIVE_GALLERY_SCRIPT.new()
+	archive_gallery.name = "ArchiveGallery"
+	collection_world.add_child(archive_gallery)
+	archive_gallery.configure(camera)
+	archive_gallery.game_launch_requested.connect(_on_archive_launch_requested)
 
 func _resize_game_ambient() -> void:
 	if _game_ambient_mesh == null or camera == null:
@@ -579,6 +586,8 @@ func _build_ui() -> void:
 	# 游戏板块在 _ui_root 子树外（自建 CanvasLayer），显式把引用传进去
 	if game_section != null:
 		game_section.set_font_manager(font_manager)
+	if archive_gallery != null:
+		archive_gallery.set_font_manager(font_manager)
 
 	xmb_root = Control.new()
 	xmb_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -1415,6 +1424,8 @@ func _apply_section_now(index: int) -> void:
 		game_section.set_section_visible(is_games)
 	if spatial_gallery != null:
 		spatial_gallery.set_section_visible(section == "COMICS")
+	if archive_gallery != null:
+		archive_gallery.set_section_visible(section == "MUSIC")
 	system_root.visible = section == "SYSTEM"
 
 	if _bottom_hot_zone != null:
@@ -1583,6 +1594,8 @@ func _on_backend_connected() -> void:
 	_pending_fonts_list_id = backend.request("fonts.list", {})
 
 func _on_backend_disconnected(code: int, reason: String) -> void:
+	if archive_gallery != null:
+		archive_gallery.set_launch_result(false, "后端连接已断开")
 	# Invalidate pending pauses: a lost backend cannot send game.exited.
 	_delayed_pause_generation += 1
 	RenderingServer.render_loop_enabled = true
@@ -1641,6 +1654,8 @@ func _on_backend_response(request_id: String, ok: bool, data: Variant, error: Va
 				game_section.set_games(games)
 				if spatial_gallery != null:
 					spatial_gallery.set_games(game_section.games)
+				if archive_gallery != null:
+					archive_gallery.set_games(games)
 		return
 
 	if request_id == _pending_steam_search_id:
@@ -1828,6 +1843,8 @@ func _on_backend_response(request_id: String, ok: bool, data: Variant, error: Va
 	# 启动失败：作废在途的「暂停渲染」，否则 0.6 秒后画面永久冻结
 	# （成功时不动渲染——那时靠 game.exited / movie.exited 恢复）
 	if request_id == _pending_game_play_id:
+		if archive_gallery != null:
+			archive_gallery.set_launch_result(ok, "" if ok else _error_message(error))
 		_pending_game_play_id = ""
 		if not ok:
 			# 启动彻底失败（如找不到文件）
@@ -3013,6 +3030,8 @@ func _apply_fontset(scope: String, fontset: Dictionary) -> void:
 		if game_section != null:
 			game_section.set_font_manager(font_manager)
 			game_section.apply_fontset()
+		if archive_gallery != null:
+			archive_gallery.apply_fontset()
 
 func _apply_font_to_label(label: Label, key: String, scope: String = "movies") -> void:
 	if label == null or font_manager == null:
@@ -3244,6 +3263,20 @@ func _on_movie_double_clicked(movie: Dictionary) -> void:
 		_show_runtime_error("播放失败", "后端未连接")
 		return
 	_pending_movie_play_id = backend.request("movie.play", {"id": item_id})
+
+func _on_archive_launch_requested(game: Dictionary) -> void:
+	if str(game.get("id", "")).is_empty():
+		archive_gallery.set_launch_result(false, "档案编号缺失")
+		return
+	if backend == null or not backend.is_connected_to_backend():
+		archive_gallery.set_launch_result(false, "后端未连接")
+		return
+	if not _pending_game_play_id.is_empty():
+		archive_gallery.set_launch_result(false, "已有启动请求正在处理")
+		return
+	_on_game_double_clicked(game)
+	if _pending_game_play_id.is_empty():
+		archive_gallery.set_launch_result(false, "请求未发送，请重试")
 
 func _on_game_double_clicked(game: Dictionary) -> void:
 	var item_id: String = str(game.get("id", ""))

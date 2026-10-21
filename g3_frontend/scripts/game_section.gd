@@ -1730,14 +1730,18 @@ func _play_cell_animation(index: int) -> void:
 	if holder == null or not is_instance_valid(holder):
 		return
 	var path: String = str(btn.get_meta("anim_path"))
+	if not ClassDB.class_exists(&"AnimatedImagePlayer"):
+		return
 	var anim_tex = _get_animated_texture(path)
 	if anim_tex == null:
 		return
-	var player: AnimatedImagePlayer = null
+	var player: Control = null
 	if holder.has_meta("player"):
-		player = holder.get_meta("player") as AnimatedImagePlayer
+		player = holder.get_meta("player") as Control
 	if player == null or not is_instance_valid(player):
-		player = AnimatedImagePlayer.new()
+		player = ClassDB.instantiate(&"AnimatedImagePlayer") as Control
+		if player == null:
+			return
 		player.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		player.set("expand_mode", 1)
 		player.set("stretch_mode", 6)
@@ -1745,7 +1749,7 @@ func _play_cell_animation(index: int) -> void:
 		holder.add_child(player)
 		holder.set_meta("player", player)
 	if player.get("animated_image") != anim_tex:
-		player.animated_image = anim_tex
+		player.set("animated_image", anim_tex)
 	player.set("playing", true)
 	holder.visible = true
 
@@ -1761,7 +1765,7 @@ func _stop_cell_animation(index: int) -> void:
 	if holder == null or not is_instance_valid(holder):
 		return
 	if holder.has_meta("player"):
-		var player: AnimatedImagePlayer = holder.get_meta("player") as AnimatedImagePlayer
+		var player: Control = holder.get_meta("player") as Control
 		if player != null and is_instance_valid(player):
 			player.set("playing", false)
 	holder.visible = false
@@ -1769,10 +1773,22 @@ func _stop_cell_animation(index: int) -> void:
 func _get_animated_texture(path: String):
 	if _animated_cache.has(path):
 		return _animated_cache[path]
-	var tex = AnimatedImageLoader.load_from_file(path)
+	if not ClassDB.class_exists(&"AnimatedImageLoader"):
+		return null
+	var tex = ClassDB.class_call_static(&"AnimatedImageLoader", &"load_from_file", path)
 	if tex != null:
 		_animated_cache[path] = tex
 	return tex
+
+func _load_animated_poster(path: String) -> Texture2D:
+	if ClassDB.class_exists(&"AnimatedImageLoader"):
+		return ClassDB.class_call_static(&"AnimatedImageLoader", &"load_poster_from_file", path) as Texture2D
+	# Godot can still decode a static WebP without the optional native plugin.
+	var image := Image.new()
+	if image.load(path) != OK or image.is_empty():
+		return null
+	image.generate_mipmaps()
+	return ImageTexture.create_from_image(image)
 
 func _load_image_smart(path: String) -> Texture2D:
 	var f := FileAccess.open(path, FileAccess.READ)
@@ -1787,22 +1803,22 @@ func _load_image_smart(path: String) -> Texture2D:
 		if img.load_png_from_buffer(bytes) == OK:
 			img.generate_mipmaps()
 			return ImageTexture.create_from_image(img)
-		return AnimatedImageLoader.load_poster_from_file(path)
+		return _load_animated_poster(path)
 	if bytes[0] == 0xFF and bytes[1] == 0xD8 and bytes[2] == 0xFF:
 		if img.load_jpg_from_buffer(bytes) == OK:
 			img.generate_mipmaps()
 			return ImageTexture.create_from_image(img)
-		return AnimatedImageLoader.load_poster_from_file(path)
+		return _load_animated_poster(path)
 	if bytes[0] == 0x52 and bytes[1] == 0x49 and bytes[2] == 0x46 and bytes[3] == 0x46 \
 			and bytes.size() >= 12 \
 			and bytes[8] == 0x57 and bytes[9] == 0x45 and bytes[10] == 0x42 and bytes[11] == 0x50:
-		return AnimatedImageLoader.load_poster_from_file(path)
+		return _load_animated_poster(path)
 	if bytes[0] == 0x42 and bytes[1] == 0x4D:
 		if img.load_bmp_from_buffer(bytes) == OK:
 			img.generate_mipmaps()
 			return ImageTexture.create_from_image(img)
-		return AnimatedImageLoader.load_poster_from_file(path)
-	return AnimatedImageLoader.load_poster_from_file(path)
+		return _load_animated_poster(path)
+	return _load_animated_poster(path)
 
 func _select_index(new_index: int) -> void:
 	if new_index < 0 or new_index >= games.size():
@@ -1999,7 +2015,7 @@ func _apply_cover_texture(cover_rect: TextureRect, img: Image, path: String, btn
 func _apply_cover_texture_plugin(cover_rect: TextureRect, path: String, btn: Button) -> void:
 	if not is_instance_valid(cover_rect):
 		return
-	var tex: Texture2D = AnimatedImageLoader.load_poster_from_file(path)
+	var tex: Texture2D = _load_animated_poster(path)
 	if tex != null:
 		_cover_texture_cache[path] = tex # 写入缓存
 		cover_rect.texture = tex
@@ -2008,6 +2024,8 @@ func _apply_cover_texture_plugin(cover_rect: TextureRect, path: String, btn: But
 func _check_animated(path: String, btn: Button) -> void:
 	var ext: String = path.get_extension().to_lower()
 	if ext == "webp" or ext == "gif" or ext == "apng":
-		var info = AnimatedImageLoader.probe_file(path)
+		if not ClassDB.class_exists(&"AnimatedImageLoader"):
+			return
+		var info = ClassDB.class_call_static(&"AnimatedImageLoader", &"probe_file", path)
 		if info != null and bool(info.get("animated", false)):
 			btn.set_meta("anim_path", path)

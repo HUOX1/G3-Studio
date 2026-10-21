@@ -951,7 +951,9 @@ func _rebuild_content_blocks(blocks: Array) -> void:
 			var path_str: String = str(b.get("path", ""))
 			if path_str.is_empty() or not FileAccess.file_exists(path_str):
 				continue
-			var anim = AnimatedImageLoader.load_from_file(path_str)
+			if not ClassDB.class_exists(&"AnimatedImageLoader") or not ClassDB.class_exists(&"AnimatedImagePlayer"):
+				continue
+			var anim = ClassDB.class_call_static(&"AnimatedImageLoader", &"load_from_file", path_str)
 			if anim == null:
 				continue
 			var win_w: float = size.x
@@ -969,12 +971,15 @@ func _rebuild_content_blocks(blocks: Array) -> void:
 			wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			_content_container.add_child(wrap)
-			var player := AnimatedImagePlayer.new()
+			var player := ClassDB.instantiate(&"AnimatedImagePlayer") as Control
+			if player == null:
+				wrap.queue_free()
+				continue
 			player.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 			player.set("expand_mode", 1)
 			player.set("stretch_mode", 5)
 			player.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			player.animated_image = anim
+			player.set("animated_image", anim)
 			player.set("playing", true)
 			wrap.add_child(player)
 
