@@ -154,3 +154,17 @@
 - **字体预览防抖**：加入 0.1 秒定时器防卡顿。
 - **代码删除**：彻底删除 `steam_html.py`、`sticky_bar` shader、图文混合渲染逻辑、废弃的 `preview_panel.gd`。
 - **下一步大重构**：`main.gd` 已达 166KB，计划拆分出 `backend_router` 与各大板块的 controller。
+
+---
+
+## 17. 三维档案空间 UI 原型（2026-10-21）
+
+- **设计方向**：启动 RhineArchive 风格的三维档案空间实验，尝试将传统游戏列表/海报墙扩展为具有空间层次的档案陈列界面。当前定位为可继续打磨的原型，不代表最终 UI 已验收。
+- **新增场景与控制器**：新增 `g3_frontend/scenes/archive_stage.tscn` 和 `g3_frontend/scripts/archive_gallery.gd`，用于组织档案空间场景与交互逻辑。
+- **新增 Shader**：加入 `archive_atmosphere.gdshader`、`archive_cover.gdshader`、`archive_floor.gdshader`、`archive_glass.gdshader`，分别支撑氛围、封面、地面和玻璃视觉实验。
+- **现有界面接入**：调整 `main.tscn`、`main.gd`、`game_section.gd`、`game_detail_view.gd` 与 `navigation_drawer.gd`，接入原型相关入口和显示逻辑。
+- **设计记录与测试**：新增 `docs/design/G3_Archive_Space_02.md`、`g3_frontend/tests/archive_gallery_smoke.gd`，以及 Python 合约测试 `g3_tests/test_archive_gallery_contract.py`、`g3_tests/test_optional_animated_extension.py`。
+- **测试结果**：针对新增 Python 测试运行 `pytest`，结果为 **5 passed**。这只证明对应测试通过；Godot 场景实际运行、Shader 编译、渲染表现与完整交互仍需在本机 Godot 环境中验收。
+- **版本记录**：变更已提交为 `000b0d1`（`Add 3D archive gallery UI prototype`），并已成功推送到 `origin/main`。
+- **后续重点**：优先在本机检查场景是否正常加载、卡片/导航交互是否符合预期、窗口缩放是否稳定，以及玻璃和氛围 Shader 的实际观感；根据截图与运行日志继续迭代，避免把静态代码检查当作视觉验收。
+
