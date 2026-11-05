@@ -66,9 +66,9 @@ if (Test-LocalPort $proxyPort) {
     Write-Host "[代理] Clash 在线 (:$proxyPort)，走代理" -ForegroundColor DarkGray
 } else {
     $netArgs = @("-c", "http.proxy=", "-c", "https.proxy=")
-    Write-Host "[代理] 未检测到 :$proxyPort，尝试直连" -ForegroundColor Yellow
+    Write-Host "[代理] 未检测到 :$proxyPort，走系统通道（schannel + hosts）" -ForegroundColor Yellow
 }
-$netArgs += @("-c", "http.sslBackend=openssl")
+$netArgs += @("-c", "http.sslBackend=schannel")
 
 # ---------- 2. 提交 ----------
 $st = Invoke-Git @("-c", "core.quotepath=false", "status", "--porcelain")
