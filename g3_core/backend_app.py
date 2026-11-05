@@ -7,7 +7,9 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 import time
+import uuid
 from typing import Awaitable, Callable
 
 from .database import Database
@@ -16,6 +18,7 @@ from .repository import LibraryRepository
 from .services.media_assets import MediaAssetService
 from .services.cover_tool import CoverToolService
 from .services.game_runtime import GameRuntime
+from .services.game_process_probe import process_snapshot, choose_game_pids
 from .services.library_scanner import MovieLibraryScanner
 from .services.emulator_scanner import EmulatorScanner
 from .services.steam_library_scanner import SteamLibraryScanner
@@ -24,15 +27,17 @@ from .services.epic_library_scanner import EpicLibraryScanner
 from .services.uplay_library_scanner import UplayLibraryScanner
 from .services.rockstar_library_scanner import RockstarLibraryScanner
 from .services.psn_library_scanner import PSNLibraryScanner
-from .services.themes import ThemeManifest, ThemeService
+from .services.game_theme import GameThemeService
+from .services.elden_ring_save import read_local_save
 from .settings import TerminalSettings
 from g3_core.version import VERSION, DISPLAY
 from .services.tmdb_client import TMDBClient, TMDBConfig, TMDBError, localize_genre
 from .services.steamgriddb_client import SGDBClient, SGDBConfig, SGDBError
+from .services.sgdb_hero_optimizer import optimize_sgdb_image, MEDIA_LIMITS, is_animated_webp
 from .services.steam_client import SteamClient, SteamError
 from .services.fontset_store import FontsetStore
 from .services.font_scanner import list_windows_fonts
-from .services.media_assets import MediaAssetService, sanitize_cover_stem
+from .services.media_assets import MediaAssetService
 
 logger = logging.getLogger("g3.backend")
 EventSink = Callable[[str, dict[str, object]], Awaitable[None]]
@@ -134,7 +139,7 @@ def _find_derived_process(launch_stem: str) -> str:
 
 
 class BackendApplication:
-	def __init__(self, paths: TerminalPaths, *, builtin_theme_root: Path) -> None:
+	def __init__(self, paths: TerminalPaths) -> None:
 		self.paths = paths
 		self.database = Database(paths.database)
 		self.repository = LibraryRepository(self.database)
@@ -145,10 +150,8 @@ class BackendApplication:
 			covers_root=paths.covers,
 			media_root=paths.media,
 		)
-		self.themes = ThemeService(
-			builtin_root=Path(builtin_theme_root),
-			user_root=paths.themes,
-		)
+		# Per-game cover palette is an internal adaptive visual feature.
+		self.game_theme_service = GameThemeService(paths.cache)
 		self.scanner = MovieLibraryScanner(self.repository)
 		self.cover_tool = CoverToolService(self.repository)
 		self.game_runtime = GameRuntime(self.repository)
@@ -159,16 +162,32 @@ class BackendApplication:
 		self._backdrop_tasks_keys: set[str] = set()
 		self._sgdb_thumb_tasks: set[asyncio.Task[None]] = set()
 		self._steam_watch_task: asyncio.Task[None] | None = None
+		self._scraping_games: set[str] = set()
+		self._scraping_lock: threading.Lock = threading.Lock()
 
 	def initialize(self) -> None:
 		self.paths.ensure()
 		self.database.initialize()
-		# 一次性把 covers/games 的旧平铺素材迁进「按游戏名分文件夹」结构
 		self._migrate_game_assets()
 		self._log_broken_steam_appids()
+		self._cleanup_orphan_screenshot_dirs()
 		self.settings = TerminalSettings.load(self.paths.settings)
 		self.media.ffmpeg_path = self.settings.ffmpeg_path
 		self.settings.save(self.paths.settings)
+
+	def _cleanup_orphan_screenshot_dirs(self) -> None:
+		"""清理异常退出时留下的截图临时/备份目录"""
+		games_dir = self.media.covers_root / "games"
+		if not games_dir.is_dir():
+			return
+		for game_dir in games_dir.iterdir():
+			if not game_dir.is_dir():
+				continue
+			for sub in game_dir.iterdir():
+				if not sub.is_dir():
+					continue
+				if sub.name.startswith("screenshots_tmp_") or sub.name.startswith("screenshots_bak_"):
+					shutil.rmtree(sub, ignore_errors=True)
 
 	def _log_broken_steam_appids(self) -> None:
 		"""只记日志：把 source='steam' 但 appid 明显不对（<= 1）的条目标出来。
@@ -318,7 +337,7 @@ class BackendApplication:
 		while True:
 			try:
 				await asyncio.sleep(10.0)
-				scanner = SteamLibraryScanner(self.repository)
+				scanner = SteamLibraryScanner(self.repository, self.media)
 				mtime = await asyncio.to_thread(scanner.get_localconfig_mtime)
 				if mtime <= last_mtime:
 					continue
@@ -384,13 +403,14 @@ class BackendApplication:
 			cover_source = str(payload.get("cover_source", "")).strip()
 			if cover_source:
 				try:
-					self.media.set_game_cover(game["id"], Path(cover_source))
+					cover_path = self.media.set_game_cover(game["id"], Path(cover_source))
+					self.game_theme_service.invalidate(cover_path)
 				except Exception as exc:
 					logger.warning("game cover import failed: %s", exc)
 			# Steam 游戏：顺手从 Steam 缓存搬素材（失败不影响创建）
 			if source_value == "steam" and steam_appid_value > 0:
 				try:
-					steam_scanner = SteamLibraryScanner(self.repository)
+					steam_scanner = SteamLibraryScanner(self.repository, self.media)
 					await asyncio.to_thread(
 						steam_scanner._import_steam_assets, steam_appid_value, title, game["id"]
 					)
@@ -412,6 +432,18 @@ class BackendApplication:
 			)
 			return {"id": item_id, "removed": True}
 
+		if command_type == "game.save_insights.read":
+			item_id = self._require_id(payload)
+			game = self.repository.get_game(item_id)
+			if game is None:
+				raise KeyError(item_id)
+			appid = int(game.get("steam_appid", 0) or 0)
+			title = str(game.get("title", "")).casefold()
+			english_name = str(game.get("english_name", "")).casefold()
+			if not (appid == 1245620 or ("elden ring" in title or "elden ring" in english_name) or "艾尔登法环" in title or "艾爾登法環" in title):
+				return {"status": "unsupported", "message": "暂仅支持艾尔登法环 PC 存档"}
+			return await asyncio.to_thread(read_local_save)
+
 		if command_type == "game.metadata.get":
 			item_id = self._require_id(payload)
 			game = self.repository.get_game(item_id)
@@ -419,13 +451,58 @@ class BackendApplication:
 				raise KeyError(item_id)
 			return self._game_to_dict(game)
 
+		if command_type == "game.theme.palette":
+			item_id = self._require_id(payload)
+			game = self.repository.get_game(item_id)
+			if game is None:
+				raise KeyError(item_id)
+			game_data = self._game_to_dict(game)
+			backdrop_value = game_data.get("backdrop", [])
+			hero_path = ""
+			if isinstance(backdrop_value, list):
+				for candidate in backdrop_value:
+					candidate_path = str(candidate).strip()
+					if candidate_path and Path(candidate_path).is_file():
+						hero_path = candidate_path
+						break
+			cover_path = str(game_data.get("cover", "")).strip()
+			candidates: list[tuple[str, str]] = []
+			if hero_path:
+				candidates.append((hero_path, "hero"))
+			if cover_path and Path(cover_path).is_file() and cover_path != hero_path:
+				candidates.append((cover_path, "cover"))
+			palette: dict[str, object] | None = None
+			source_kind = "fallback"
+			for image_path, image_kind in candidates:
+				candidate_palette = await asyncio.to_thread(
+					self.game_theme_service.get_palette, Path(image_path)
+				)
+				if str(candidate_palette.get("status", "fallback")) == "ready":
+					palette = candidate_palette
+					source_kind = image_kind
+					break
+				palette = candidate_palette
+			if palette is None:
+				palette = await asyncio.to_thread(self.game_theme_service.get_palette, None)
+			palette = dict(palette)
+			if os.environ.get("G3_THEME_DIAG") == "1":
+				logger.warning(
+					"[G3_THEME_DIAG] response item=%s backdrop_candidates=%s selected_hero=%s cover=%s source=%s status=%s colors=%s",
+					item_id, backdrop_value, hero_path, cover_path, source_kind,
+					palette.get("status"), palette.get("colors"),
+				)
+			palette["source"] = source_kind
+			return {"item_id": item_id, "source": source_kind, "palette": palette}
+
 		if command_type == "game.metadata.update":
 			item_id = self._require_id(payload)
 			previous = self.repository.get_game(item_id)
 			if previous is None:
 				raise KeyError(item_id)
+			saved_assets: dict[str, Path] = {}
+			saved_shots: list[tuple[Path, str]] = []
 			if str(previous["title"]) != str(payload.get("title", "")).strip():
-				self._preserve_game_assets_before_rename(previous)
+				saved_assets, saved_shots = self._collect_game_assets_before_rename(previous)
 			updated = self.repository.update_game_metadata(
 				item_id,
 				title=str(payload.get("title", "")),
@@ -439,6 +516,8 @@ class BackendApplication:
 				notes=str(payload.get("notes", "")),
 				genres=str(payload.get("genres", "")),
 			)
+			if saved_assets or saved_shots:
+				self._restore_game_assets_after_rename(item_id, saved_assets, saved_shots)
 			await self._event_sink("library.changed", {"media_type": "game", "item_id": item_id})
 			return self._game_to_dict(updated)
 
@@ -480,6 +559,7 @@ class BackendApplication:
 			if not source_str:
 				raise ValueError("source is required")
 			cover_path = self.media.set_game_cover(item_id, Path(source_str))
+			self.game_theme_service.invalidate(cover_path)
 			await self._event_sink("library.changed", {"media_type": "game", "item_id": item_id})
 			return {"cover": str(cover_path)}
 
@@ -488,15 +568,23 @@ class BackendApplication:
 			game = self.repository.get_game(item_id)
 			if game is None:
 				raise KeyError(item_id)
+			# Snapshot before launching, so a pre-existing launcher process is not
+			# mistaken for the newly started game.
+			before_pids = set(process_snapshot()) if os.name == "nt" else set()
+			logger.info("[G3DIAG] launch baseline item=%s before_pid_count=%d", item_id, len(before_pids))
 			try:
 				running = self.game_runtime.launch(game)
 			except Exception:
 				logger.exception("Game launch failed: item=%s", item_id)
 				raise
-			task = asyncio.create_task(self._watch_game_process(running))
+			# Allocate only after a successful launch; the same ID travels through
+			# the command response and every event from this watcher.
+			play_session_id = uuid.uuid4().hex
+			task = asyncio.create_task(self._watch_game_process(running, before_pids, play_session_id))
 			self._movie_tasks.add(task)
 			task.add_done_callback(self._movie_tasks.discard)
-			return {"ok": True, "item_id": item_id, "monitorable": running.monitorable}
+			return {"ok": True, "item_id": item_id, "monitorable": running.monitorable,
+				"play_session_id": play_session_id}
 
 		if command_type == "movie.backdrop.ensure":
 			item_id = self._require_id(payload)
@@ -637,6 +725,7 @@ class BackendApplication:
 
 			mpv = str(self.settings.mpv_path or "").strip()
 			monitorable = False
+			play_session_id = ""
 			if mpv and Path(mpv).is_file():
 				import subprocess
 				import time as _time
@@ -655,8 +744,9 @@ class BackendApplication:
 					],
 					**kwargs,
 				)
+				play_session_id = uuid.uuid4().hex
 				task = asyncio.create_task(
-					self._watch_movie_process(proc, item_id, _time.monotonic())
+					self._watch_movie_process(proc, item_id, _time.monotonic(), play_session_id)
 				)
 				self._movie_tasks.add(task)
 				task.add_done_callback(self._movie_tasks.discard)
@@ -666,7 +756,10 @@ class BackendApplication:
 			else:
 				import subprocess
 				subprocess.Popen(["xdg-open", str(source_path)])
-			return {"ok": True, "path": str(source_path), "monitorable": monitorable}
+			result = {"ok": True, "path": str(source_path), "monitorable": monitorable}
+			if play_session_id:
+				result["play_session_id"] = play_session_id
+			return result
 
 		if command_type == "movie.backdrop.refresh":
 			item_id = self._require_id(payload)
@@ -822,6 +915,7 @@ class BackendApplication:
 			if sgdb_id <= 0:
 				raise ValueError("sgdb_id is required")
 			asset_type = str(payload.get("asset_type", "grid")).strip() or "grid"
+			batch_id = str(payload.get("batch_id", ""))
 			client = self._get_sgdb_client()
 			if asset_type == "hero":
 				items = await asyncio.to_thread(client.get_heroes, sgdb_id)
@@ -849,8 +943,15 @@ class BackendApplication:
 				h = hashlib.sha1(src_url.encode("utf-8")).hexdigest()[:16]
 				for ext in ("png", "jpg", "jpeg", "webp", "bmp"):
 					candidate = cache_dir / f"{h}.{ext}"
-					if candidate.is_file():
+					if not candidate.is_file():
+						continue
+					if self._valid_sgdb_thumb(candidate):
 						return str(candidate).replace("\\", "/")
+					# A stale/failed response may have been cached as a JPG.
+					try:
+						candidate.unlink()
+					except OSError:
+						pass
 				return ""
 
 			# 一阶段：只填已有缓存，立即返回列表
@@ -869,37 +970,102 @@ class BackendApplication:
 			# 二阶段：缺的图片派发后台任务，一张下好推一个事件
 			if missing:
 				task = asyncio.create_task(
-					self._download_thumbs_bg(client, missing, asset_type)
+					self._download_thumbs_bg(client, missing, asset_type, sgdb_id, batch_id)
 				)
 				self._sgdb_thumb_tasks.add(task)
 				task.add_done_callback(self._sgdb_thumb_tasks.discard)
 
-			return {"items": items, "asset_type": asset_type}
+			return {"items": items, "asset_type": asset_type, "batch_id": batch_id}
+
+		if command_type == "sgdb.asset.info":
+			url = str(payload.get("url", "")).strip()
+			if not url:
+				raise ValueError("url is required")
+			client = self._get_sgdb_client()
+			return {"url": url, "file_size": await asyncio.to_thread(client.image_content_length, url)}
 
 		if command_type == "sgdb.apply":
 			item_id = self._require_id(payload)
 			sgdb_id = int(payload.get("sgdb_id", 0) or 0)
 			url = str(payload.get("url", "")).strip()
 			asset_type = str(payload.get("asset_type", "grid")).strip() or "grid"
+			operation_id = str(payload.get("operation_id", ""))
 			if not url:
 				raise ValueError("url is required")
 			client = self._get_sgdb_client()
-			image_bytes = await asyncio.to_thread(client.download_image, url)
-			# 按字节头判断真实格式（webp / png / jpg）
+
+			async def _progress(phase: str, **details: object) -> None:
+				if operation_id:
+					await self._event_sink("sgdb.apply.progress", {
+						"operation_id": operation_id, "item_id": item_id,
+						"asset_type": asset_type, "phase": phase, **details,
+					})
+
+			# Download bytes on a worker; forward real Content-Length progress
+			# to the event loop at a bounded rate, never from the worker thread.
+			progress_queue: asyncio.Queue[tuple[int, int]] = asyncio.Queue()
+			loop = asyncio.get_running_loop()
+
+			def _report(downloaded: int, total: int) -> None:
+				loop.call_soon_threadsafe(progress_queue.put_nowait, (downloaded, total))
+
+			await _progress("download", downloaded=0, total=0)
+			download_task = asyncio.create_task(asyncio.to_thread(client.download_image, url, _report))
+			last_emit = 0.0
+			while not download_task.done() or not progress_queue.empty():
+				try:
+					downloaded, total = await asyncio.wait_for(progress_queue.get(), timeout=0.12)
+				except asyncio.TimeoutError:
+					continue
+				while not progress_queue.empty():
+					downloaded, total = progress_queue.get_nowait()
+				if loop.time() - last_emit >= 0.12 or (total > 0 and downloaded >= total):
+					await _progress("download", downloaded=downloaded, total=total)
+					last_emit = loop.time()
+			image_bytes = await download_task
 			real_ext = self._detect_image_ext(image_bytes)
+			original_bytes = len(image_bytes)
+			optimized = False
+			original_size = (0, 0)
+			if (asset_type in MEDIA_LIMITS and original_bytes > MEDIA_LIMITS[asset_type][1]
+					and not (asset_type == "grid" and is_animated_webp(image_bytes))):
+				await _progress("optimize", original_bytes=original_bytes)
+				opt_queue: asyncio.Queue[tuple[str, int, int]] = asyncio.Queue()
+				def _opt_report(stage: str, done: int, total: int) -> None:
+					loop.call_soon_threadsafe(opt_queue.put_nowait, (stage, done, total))
+				opt_task = asyncio.create_task(asyncio.to_thread(
+					optimize_sgdb_image, image_bytes, real_ext, asset_type, _opt_report
+				))
+				last_opt_emit = 0.0
+				while not opt_task.done() or not opt_queue.empty():
+					try:
+						stage, done, total = await asyncio.wait_for(opt_queue.get(), timeout=0.15)
+					except asyncio.TimeoutError:
+						continue
+					while not opt_queue.empty():
+						stage, done, total = opt_queue.get_nowait()
+					if loop.time() - last_opt_emit >= 0.15 or (total > 0 and done >= total) or stage != "decode":
+						await _progress("optimize", original_bytes=original_bytes,
+							stage=stage, done=done, total=total)
+						last_opt_emit = loop.time()
+				image_bytes, real_ext, optimized, original_size = await opt_task
+			await _progress("save", original_bytes=original_bytes,
+				final_bytes=len(image_bytes), optimized=optimized,
+				width=original_size[0], height=original_size[1])
 			import tempfile
 			with tempfile.NamedTemporaryFile(suffix=f".{real_ext}", delete=False) as tmp:
-				tmp.write(image_bytes)
 				tmp_path = Path(tmp.name)
 			try:
+				await asyncio.to_thread(tmp_path.write_bytes, image_bytes)
 				if asset_type == "icon":
-					self._save_icon_as_png(item_id, tmp_path)
+					await asyncio.to_thread(self._save_icon_as_png, item_id, tmp_path)
 				elif asset_type == "grid":
-					self.media.set_game_asset(item_id, tmp_path, "")
+					await asyncio.to_thread(self.media.set_game_asset, item_id, tmp_path, "")
 				elif asset_type == "hero":
-					self.media.set_game_asset(item_id, tmp_path, "backdrop")
+					hero_path = await asyncio.to_thread(self.media.set_game_asset, item_id, tmp_path, "backdrop")
+					self.game_theme_service.invalidate(hero_path)
 				else:
-					self.media.set_game_asset(item_id, tmp_path, asset_type)
+					await asyncio.to_thread(self.media.set_game_asset, item_id, tmp_path, asset_type)
 			finally:
 				try:
 					tmp_path.unlink(missing_ok=True)
@@ -908,10 +1074,11 @@ class BackendApplication:
 			if sgdb_id > 0:
 				self.repository.set_game_sgdb_id(item_id, sgdb_id)
 			await self._event_sink(
-				"library.changed",
-				{"media_type": "game", "item_id": item_id},
+				"library.changed", {"media_type": "game", "item_id": item_id},
 			)
-			return {"applied": True, "asset_type": asset_type}
+			return {"applied": True, "asset_type": asset_type,
+				"original_bytes": original_bytes, "final_bytes": len(image_bytes),
+				"optimized": optimized}
 
 		if command_type == "game.scrape.search":
 			query = str(payload.get("query", "")).strip()
@@ -981,7 +1148,7 @@ class BackendApplication:
 
 		if command_type == "game.scan_steam_library":
 			# 纯查询：扫本地 Steam 库，列出已安装的游戏
-			steam_scanner = SteamLibraryScanner(self.repository)
+			steam_scanner = SteamLibraryScanner(self.repository, self.media)
 			return await asyncio.to_thread(steam_scanner.scan)
 
 		if command_type == "game.scan_gog_library":
@@ -1216,24 +1383,7 @@ class BackendApplication:
 			deleted = self.repository.delete_emulator(emulator_id)
 			return {"id": emulator_id, "deleted": deleted}
 
-		if command_type == "themes.list":
-			return self._list_themes()
-		if command_type == "theme.current":
-			manifest = self.themes.load(self.settings.current_theme)
-			return self._theme_to_dict(manifest)
 		raise KeyError(f"unknown command: {command_type}")
-
-	def _list_themes(self) -> list[dict[str, object]]:
-		"""复用 ThemeService.list_themes()，避免遍历逻辑重复。"""
-		active_theme_id: str = self.settings.current_theme
-		return [
-			{
-				"id": manifest.id,
-				"name": manifest.name,
-				"active": manifest.id == active_theme_id,
-			}
-			for manifest in self.themes.list_themes()
-		]
 
 	async def _ensure_backdrop_async(self, item_id: str) -> None:
 		try:
@@ -1268,178 +1418,180 @@ class BackendApplication:
 			)
 
 	async def _watch_movie_process(
-		self, proc, item_id: str, started_at: float
+		self, proc, item_id: str, started_at: float, play_session_id: str = ""
 	) -> None:
 		import time as _time
 		loop = asyncio.get_running_loop()
 		try:
-			await loop.run_in_executor(None, proc.wait)
-		except Exception:
-			logger.exception("Movie process watch failed")
+			try:
+				await loop.run_in_executor(None, proc.wait)
+			except Exception:
+				# The process status is unknown, but the frontend must not
+				# remain render-paused after monitoring has failed.
+				logger.exception("Movie process watch failed")
+				return
+
+			elapsed = _time.monotonic() - started_at
+			# 2 分钟门槛：低于门槛不计入
+			if elapsed >= 120.0 and item_id:
+				try:
+					just_completed = await asyncio.to_thread(
+						self.repository.add_watch_seconds, item_id, int(elapsed)
+					)
+					if just_completed:
+						await self._event_sink(
+							"movie.watched_complete", {"item_id": item_id}
+						)
+				except Exception:
+					logger.exception(
+						"Failed to record watch seconds: item_id=%s", item_id
+						)
+		finally:
+			# Also notify on proc.wait failure; this is a render-release
+			# fallback, not proof that the external player has exited.
+			await self._event_sink(
+				"movie.exited",
+				{"play_session_id": play_session_id} if play_session_id else {},
+			)
+
+	async def _watch_game_process(self, running, before_pids: set[int], play_session_id: str) -> None:
+		"""Track the actual game session, never the Steam/Epic/Uplay shell PID.
+
+		Windows: new processes under the game installation directory, process
+		descendants, or a user-configured monitor_exe. A launcher response is NOT
+		enough to pause the UI; the frontend waits for game.running.
+		"""
+		item_id = running.item_id
+		if not running.monitorable:
+			return
+		if os.name != "nt":
+			# Preserve direct-launch behavior on non-Windows platforms.
+			if running.process is None:
+				return
+			await self._event_sink("game.running", {"item_id": item_id, "play_session_id": play_session_id})
+			await asyncio.to_thread(running.process.wait)
+			elapsed = max(0, int((datetime.now(timezone.utc) - running.started_at).total_seconds()))
+			if elapsed:
+				self.repository.update_game_play_stats(item_id, elapsed, datetime.now(timezone.utc))
+			await self._event_sink("game.exited", {"item_id": item_id, "elapsed_seconds": elapsed,
+				"play_session_id": play_session_id})
 			return
 
-		elapsed = _time.monotonic() - started_at
-		# 2 分钟门槛：低于门槛不计入
-		if elapsed >= 120.0 and item_id:
-			try:
-				just_completed = await asyncio.to_thread(
-					self.repository.add_watch_seconds, item_id, int(elapsed)
-				)
-				if just_completed:
-					await self._event_sink(
-						"movie.watched_complete", {"item_id": item_id}
-					)
-			except Exception:
-				logger.exception(
-					"Failed to record watch seconds: item_id=%s", item_id
-				)
-
-		await self._event_sink("movie.exited", {})
-
-	async def _watch_game_process(self, running) -> None:
-		"""等游戏会话结束。"""
-		monitor_name = ""
-		raw_monitor = getattr(running, "monitor_exe", "") or ""
-		if raw_monitor:
-			monitor_name = Path(raw_monitor).name
-
-		counted: bool = True
-
-		if monitor_name:
-			counted = await self._watch_by_monitor_name(monitor_name)
-		else:
-			proc = running.process
-			launch_exe = str(getattr(running, "launch_exe", "") or "")
-			if not launch_exe:
-				# 兜底：从数据库里拿 launch_exe
-				try:
-					game_row = self.repository.get_game(running.item_id)
-					if game_row is not None:
-						launch_exe = str(game_row.get("launch_exe", "") or "")
-						if not launch_exe and str(game_row.get("profile_type", "direct")) == "direct":
-							# direct 模式下，launch_exe 可能为空，真正的启动路径在 source_path
-							launch_exe = str(game_row.get("source_path", "") or "")
-				except Exception:
-					logger.exception("failed to fetch launch_exe for item: %s", running.item_id)
-			fallback_name = Path(launch_exe).name if launch_exe else ""
-
-			if proc is None:
-				# 管理员启动拿不到句柄 → 用 launch_exe 的文件名兜底轮询
-				if fallback_name:
-					counted = await self._watch_by_monitor_name(fallback_name)
-				else:
-					return
-			else:
-				# 【关键修复】应对 R星/Epic 这种启动壳
-				# 刚启动时给一点缓冲，然后用 tasklist 查一下 exe 是不是真的在跑
-				if fallback_name and os.name == "nt":
-					await asyncio.sleep(1.0)
-					if _is_process_running(fallback_name):
-						# 如果系统里还有这个进程，说明 Popen 的句柄不可靠
-						# 直接放弃 proc.wait()，改用名字轮询，死等它消失
-						logger.info(
-							"Process handle unreliable, fallback to name polling: %s",
-							fallback_name,
-						)
-						counted = await self._watch_by_monitor_name(fallback_name)
-						# 轮询结束后，直接跳到最后记录时长，不再往下走
-						started = running.started_at
-						now = datetime.now(timezone.utc)
-						elapsed = int((now - started).total_seconds())
-						if elapsed > 0 and counted:
-							try:
-								self.repository.update_game_play_stats(running.item_id, elapsed, now)
-							except Exception:
-								logger.exception("Failed to update playtime: %s", running.item_id)
-						await self._event_sink(
-							"game.exited",
-							{"item_id": running.item_id, "elapsed_seconds": elapsed},
-						)
-						return
-
-				# 如果句柄可靠，或者不是 Windows，就老老实实等进程退出
-				loop = asyncio.get_running_loop()
-				try:
-					await loop.run_in_executor(None, proc.wait)
-				except Exception:
-					logger.exception("Game process watch failed")
-					return
-
-				# 启动进程正常退出后，找衍生进程
-				if launch_exe and os.name == "nt":
-					try:
-						stem = Path(launch_exe).stem
-						derived = ""
-						for _ in range(40):
-							derived = await loop.run_in_executor(
-								None, _find_derived_process, stem
-							)
-							if derived:
-								break
-							await asyncio.sleep(1.5)
-					except Exception:
-						logger.exception("derived process probe failed")
-						derived = ""
-					if derived:
-						logger.info(
-							"derived process detected: %s (launcher=%s)",
-							derived, launch_exe,
-						)
-						await self._watch_by_monitor_name(derived)
-
-		started = running.started_at
-		now = datetime.now(timezone.utc)
-		elapsed = int((now - started).total_seconds())
-		if elapsed > 0 and counted:
-			try:
-				self.repository.update_game_play_stats(running.item_id, elapsed, now)
-			except Exception:
-				logger.exception("Failed to update playtime: %s", running.item_id)
-		await self._event_sink(
-			"game.exited",
-			{"item_id": running.item_id, "elapsed_seconds": elapsed},
-		)
-
-	async def _watch_by_monitor_name(self, monitor_name: str) -> bool:
-		"""轮询 monitor_exe 名字的进程：
-		1. 等它出现（最长 60 秒）—— 启动器拉游戏本体的时间
-		2. 等它消失（每 1.5 秒查一次）
-		3. 消失后再等 2 秒确认（避免误判）
-		"""
+		launch_pid = int(running.process.pid) if running.process is not None else 0
+		install_dir = str(getattr(running, "install_dir", "") or "")
+		monitor_exe = str(getattr(running, "monitor_exe", "") or "")
+		is_epic_session = str(getattr(running, "platform", "")).casefold() == "epic"
+		logger.info("[G3DIAG] watch start item=%s launch_pid=%s launch_exe=%r install_dir=%r monitor_exe=%r epic_session=%s baseline=%d",
+			item_id, launch_pid, running.launch_exe, install_dir, monitor_exe, is_epic_session, len(before_pids))
+		def describe_pids(pids, snapshot):
+			return [(pid, snapshot[pid].name, snapshot[pid].parent_pid, snapshot[pid].path)
+				for pid in sorted(pids) if pid in snapshot]
+		# The first PID may be a short-lived bootstrapper. Prefer session
+		# continuity; do not immediately mark a child handoff as an exit.
 		loop = asyncio.get_running_loop()
+		deadline = time.monotonic() + 90.0
+		tracked: set[int] = set()
+		while time.monotonic() < deadline:
+			snapshot = await asyncio.to_thread(process_snapshot)
+			found = choose_game_pids(snapshot, before_pids,
+				install_dir=install_dir, launch_pid=launch_pid, monitor_exe=monitor_exe)
+			if found:
+				await asyncio.sleep(1.0)
+				confirmed = await asyncio.to_thread(process_snapshot)
+				tracked = found.intersection(confirmed)
+				if tracked:
+					logger.info("[G3DIAG] first confirmed item=%s processes=%r", item_id,
+						describe_pids(tracked, confirmed))
+					break
+			await asyncio.sleep(0.8)
 
-		# 阶段 1：等出现（缩短到 15 秒。如果 UAC 被拒绝或闪退，15 秒后自动恢复）
-		appear_timeout = 15.0
-		t0 = time.monotonic()
-		seen = False
-		while time.monotonic() - t0 < appear_timeout:
-			ok = await loop.run_in_executor(
-				None, _is_process_running, monitor_name
-			)
-			if ok:
-				seen = True
-				break
-			await asyncio.sleep(1.0)
-		if not seen:
-			logger.info(
-				"monitor_exe never appeared within %.0fs: %s",
-				appear_timeout, monitor_name,
-			)
-			return False
+		if not tracked:
+			# Diagnostics for platform bootstrapper / access-denied path handoffs.
+			last_snapshot = await asyncio.to_thread(process_snapshot)
+			new_sample = [
+				(p.pid, p.parent_pid, p.name, p.path)
+				for pid, p in last_snapshot.items() if pid not in before_pids
+			][:20]
+			logger.warning("Game process not detected: item=%s dir=%r monitor=%r launcher_pid=%s new_processes=%r",
+				item_id, install_dir, monitor_exe, launch_pid, new_sample)
+			# Unfreeze launch animation; never count an undetected session.
+			logger.info("[G3DIAG] emit game.exited item=%s reason=not_detected", item_id)
+			await self._event_sink("game.exited", {"item_id": item_id, "elapsed_seconds": 0,
+				"play_session_id": play_session_id})
+			return
 
-		# 阶段 2：等消失
+		# Start playtime only after the game process is confirmed, not at launcher startup.
+		play_started_mono = time.monotonic()
+		logger.info("Game process detected: item=%s pids=%s", item_id, sorted(tracked))
+		logger.info("[G3DIAG] emit game.running item=%s", item_id)
+		await self._event_sink("game.running", {"item_id": item_id, "play_session_id": play_session_id})
+		gone_at: float | None = None
+		previous_alive: set[int] = set(tracked)
+		# Epic may replace its bootstrap/shipping process while ownership validation
+		# is still in progress. Use a bounded handoff window until a matched process
+		# has remained continuously alive for 10 seconds; then restore the normal
+		# short exit grace so a real game exit resumes rendering promptly.
+		epic_handoff_grace = 45.0
+		stable_process_seconds = 10.0
+		exit_grace_seconds = 3.0
+		session_stable = not is_epic_session
+		stability_exe_name = Path(monitor_exe).name.casefold() if monitor_exe else ""
+		continuous_primary_since: float | None = None
 		while True:
-			ok = await loop.run_in_executor(
-				None, _is_process_running, monitor_name
-			)
-			if not ok:
-				break
 			await asyncio.sleep(1.5)
+			snapshot = await asyncio.to_thread(process_snapshot)
+			new_matches = choose_game_pids(snapshot, before_pids,
+					install_dir=install_dir, launch_pid=launch_pid, monitor_exe=monitor_exe,
+					include_install_dir_when_monitor_exe=is_epic_session)
+			added = new_matches.difference(tracked)
+			if added:
+				logger.info("[G3DIAG] newly matched item=%s processes=%r", item_id,
+					describe_pids(added, snapshot))
+			tracked.update(new_matches)
+			alive = tracked.intersection(snapshot)
+			if alive != previous_alive:
+				logger.info("[G3DIAG] alive changed item=%s previous=%s current=%s",
+					item_id, sorted(previous_alive), sorted(alive))
+			previous_alive = set(alive)
+			now_mono = time.monotonic()
+			primary_alive = bool(alive) if not stability_exe_name else any(
+				snapshot[pid].name.casefold() == stability_exe_name for pid in alive if pid in snapshot
+			)
+			if alive:
+				if gone_at is not None:
+					logger.info("[G3DIAG] alive recovered item=%s gap_seconds=%.2f",
+						now_mono - gone_at)
+				gone_at = None
+			if primary_alive:
+				if continuous_primary_since is None:
+					continuous_primary_since = now_mono
+				if is_epic_session and not session_stable and now_mono - continuous_primary_since >= stable_process_seconds:
+					session_stable = True
+					logger.info("[G3DIAG] Epic session stable item=%s exe=%r continuous_seconds=%.2f",
+						item_id, stability_exe_name or "any matched process", now_mono - continuous_primary_since)
+			else:
+				continuous_primary_since = None
+			if not alive:
+				if gone_at is None:
+					gone_at = now_mono
+					logger.info("[G3DIAG] all tracked PIDs missing item=%s tracked=%s",
+						item_id, sorted(tracked))
+				grace_seconds = exit_grace_seconds if session_stable else epic_handoff_grace
+				if now_mono - gone_at >= grace_seconds:
+					logger.info("[G3DIAG] watch exit decision item=%s gap_seconds=%.2f grace_seconds=%.1f stable=%s tracked=%s",
+						item_id, now_mono - gone_at, grace_seconds, session_stable, sorted(tracked))
+					break
 
-		# 阶段 3：确认 2 秒
-		await asyncio.sleep(2.0)
-		return True
-
+		now = datetime.now(timezone.utc)
+		elapsed = max(0, int(time.monotonic() - play_started_mono))
+		if elapsed:
+			try:
+				self.repository.update_game_play_stats(item_id, elapsed, now)
+			except Exception:
+				logger.exception("Failed to update playtime: %s", item_id)
+		logger.info("[G3DIAG] emit game.exited item=%s elapsed_seconds=%d", item_id, elapsed)
+		await self._event_sink("game.exited", {"item_id": item_id, "elapsed_seconds": elapsed,
+				"play_session_id": play_session_id})
 
 	def _get_tmdb_client(self) -> TMDBClient:
 		try:
@@ -1460,7 +1612,7 @@ class BackendApplication:
 		return SteamClient()
 
 	async def _download_thumbs_bg(
-		self, client: SGDBClient, items: list[dict], asset_type: str
+		self, client: SGDBClient, items: list[dict], asset_type: str, sgdb_id: int, batch_id: str
 	) -> None:
 		"""后台并发下载缺的缩略图，每张下好推一个事件。"""
 		import hashlib
@@ -1499,6 +1651,17 @@ class BackendApplication:
 				except Exception:
 					logger.warning("sgdb animated thumb convert failed: %s", src_url)
 					return item, ""
+			# Never cache HTTP error pages or truncated/unsupported images as .jpg.
+			try:
+				from PIL import Image as PILImage
+				import io
+				with PILImage.open(io.BytesIO(data)) as decoded:
+					if decoded.format not in ("PNG", "JPEG", "WEBP", "BMP"):
+						return item, ""
+					decoded.verify()
+			except Exception:
+				logger.warning("sgdb thumbnail response is not a valid image: %s", src_url)
+				return item, ""
 			real_ext = self._detect_image_ext(data)
 			target = cache_dir / f"{h}.{real_ext}"
 			try:
@@ -1509,31 +1672,51 @@ class BackendApplication:
 				return item, ""
 			return item, str(target).replace("\\", "/")
 
-		def _work() -> list[tuple[dict, str]]:
-			from concurrent.futures import ThreadPoolExecutor, as_completed
-			out: list[tuple[dict, str]] = []
-			with ThreadPoolExecutor(max_workers=12) as pool:
-				futures = [pool.submit(_fetch_one, it) for it in items]
-				for f in as_completed(futures):
-					try:
-						out.append(f.result())
-					except Exception:
-						continue
-			return out
+		# Stream completions as each thumbnail finishes rather than waiting for
+		# the entire batch. The semaphore retains the original 12-worker cap.
+		semaphore = asyncio.Semaphore(12)
 
-		results = await asyncio.to_thread(_work)
-		for item, local_path in results:
-			if not local_path:
-				continue
-			item["thumb_local"] = local_path
-			url = str(item.get("url", ""))
-			if not url:
-				continue
-			await self._event_sink("sgdb.thumb_ready", {
-				"asset_type": asset_type,
-				"url": url,
-				"thumb_local": local_path,
-			})
+		async def _one(item: dict) -> tuple[dict, str]:
+			async with semaphore:
+				return await asyncio.to_thread(_fetch_one, item)
+
+		tasks = [asyncio.create_task(_one(item)) for item in items]
+		completed = 0
+		try:
+			for finished in asyncio.as_completed(tasks):
+				try:
+					item, local_path = await finished
+				except Exception:
+					logger.warning("sgdb thumbnail worker failed", exc_info=True)
+					item, local_path = {}, ""
+				completed += 1
+				if local_path:
+					item["thumb_local"] = local_path
+				await self._event_sink("sgdb.thumb_ready", {
+					"sgdb_id": sgdb_id, "asset_type": asset_type,
+					"batch_id": batch_id, "url": str(item.get("url", "")),
+					"thumb_local": local_path,
+					"done": completed, "total": len(tasks),
+				})
+		finally:
+			for task in tasks:
+				if not task.done():
+					task.cancel()
+
+	@staticmethod
+	def _valid_sgdb_thumb(path: Path) -> bool:
+		"""Reject stale/corrupt cached thumbnails before Godot tries to decode them."""
+		try:
+			from PIL import Image as PILImage
+			with PILImage.open(path) as image:
+				allowed_exts = {"PNG": (".png",), "JPEG": (".jpg", ".jpeg"),
+					"WEBP": (".webp",), "BMP": (".bmp",)}
+				if path.suffix.lower() not in allowed_exts.get(image.format, ()):
+					return False
+				image.verify()
+			return True
+		except Exception:
+			return False
 
 	@staticmethod
 	def _detect_image_ext(data: bytes) -> str:
@@ -1741,79 +1924,132 @@ class BackendApplication:
 
 	def _apply_steam_scrape(self, item_id: str, appid: int) -> dict[str, object]:
 		"""抓取 Steam 数据、写库。"""
-		game = self.repository.get_game(item_id)
-		if game is None:
-			raise KeyError(item_id)
-		client = self._get_steam_client()
-		detail = client.app_details(appid)
+		with self._scraping_lock:
+			if item_id in self._scraping_games:
+				raise ValueError("该游戏正在刮削中，请稍后再试")
+			self._scraping_games.add(item_id)
+		
+		try:
+			game = self.repository.get_game(item_id)
+			if game is None:
+				raise KeyError(item_id)
+			client = self._get_steam_client()
+			detail = client.app_details(appid)
 
-		# 厂商 / 类型
-		developer = "、".join(detail.get("developers", []))
-		publisher = "、".join(detail.get("publishers", []))
-		genres = ", ".join(detail.get("genres", []))
+			# 厂商 / 类型
+			developer = "、".join(detail.get("developers", []))
+			publisher = "、".join(detail.get("publishers", []))
+			genres = ", ".join(detail.get("genres", []))
 
-		# 只用简短介绍，不再拉 HTML 图文混合
-		desc = str(detail.get("short_description", "") or "").strip()
-		if not desc:
-			# 兜底：从 detailed_description 简单剥掉 HTML 标签
-			import re as _re
-			import html as _html
-			detailed = str(detail.get("detailed_description", "") or "")
-			if detailed:
-				detailed = _re.sub(r"<br\s*/?>", "\n", detailed, flags=_re.IGNORECASE)
-				detailed = _re.sub(r"</(p|div|li|ul|ol|h[1-6])>", "\n", detailed, flags=_re.IGNORECASE)
-				text_only = _re.sub(r"<[^>]+>", "", detailed)
-				text_only = _html.unescape(text_only)
-				text_only = _re.sub(r"\n{3,}", "\n\n", text_only)
-				text_only = _re.sub(r"[ \t]+", " ", text_only).strip()
-				if len(text_only) > 300:
-					cut: int = text_only.rfind("。", 0, 300)
-					if cut < 100:
-						cut = text_only.rfind(". ", 0, 300)
-					if cut < 100:
-						cut = text_only.rfind("\n", 0, 300)
-					if cut < 100:
-						cut = 300
-					text_only = text_only[:cut + 1].rstrip() + "…"
-				desc = text_only
+			# 只用简短介绍，不再拉 HTML 图文混合
+			desc = str(detail.get("short_description", "") or "").strip()
+			if not desc:
+				# 兜底：从 detailed_description 简单剥掉 HTML 标签
+				import re as _re
+				import html as _html
+				detailed = str(detail.get("detailed_description", "") or "")
+				if detailed:
+					detailed = _re.sub(r"<br\s*/?>", "\n", detailed, flags=_re.IGNORECASE)
+					detailed = _re.sub(r"</(p|div|li|ul|ol|h[1-6])>", "\n", detailed, flags=_re.IGNORECASE)
+					text_only = _re.sub(r"<[^>]+>", "", detailed)
+					text_only = _html.unescape(text_only)
+					text_only = _re.sub(r"\n{3,}", "\n\n", text_only)
+					text_only = _re.sub(r"[ \t]+", " ", text_only).strip()
+					if len(text_only) > 300:
+						cut: int = text_only.rfind("。", 0, 300)
+						if cut < 100:
+							cut = text_only.rfind(". ", 0, 300)
+						if cut < 100:
+							cut = text_only.rfind("\n", 0, 300)
+						if cut < 100:
+							cut = 300
+						text_only = text_only[:cut + 1].rstrip() + "…"
+					desc = text_only
 
-		# 发售年份
-		release_date = str(detail.get("release_date", "") or "")
-		year = ""
-		for token in release_date.replace("年", " ").replace("/", " ").split():
-			if token.isdigit() and len(token) == 4:
-				year = token
-				break
+			# 发售年份
+			release_date = str(detail.get("release_date", "") or "")
+			year = ""
+			for token in release_date.replace("年", " ").replace("/", " ").split():
+				if token.isdigit() and len(token) == 4:
+					year = token
+					break
 
-		# 截图（最多 8 张，并发）
-		screenshot_urls = list(detail.get("screenshots", []))[:8]
-		local_screenshots: list[str] = []
-		if screenshot_urls:
+			# 截图（最多 8 张，并发）
+			screenshots_raw = detail.get("screenshots", None)
+			local_screenshots: list[str] = []
+			import json as _json
+			screenshots_json = ""
+			backup_dir = None
+
+			if screenshots_raw is None:
+				logger.warning("Steam 返回数据缺少 screenshots 字段，保留旧截图 item_id=%s", item_id)
+			elif not isinstance(screenshots_raw, list):
+				logger.warning("Steam screenshots 字段格式异常，保留旧截图 item_id=%s", item_id)
+			elif not screenshots_raw:
+				screenshots_json = "[]"
+			else:
+				screenshot_urls = screenshots_raw[:8]
+				try:
+					local_screenshots, backup_dir = self._save_steam_screenshots(
+						item_id, screenshot_urls, client
+					)
+					if local_screenshots:
+						screenshots_json = _json.dumps(local_screenshots, ensure_ascii=False)
+					else:
+						logger.warning("Steam 截图部分或全部下载失败，保留旧截图 item_id=%s", item_id)
+				except Exception:
+					logger.exception("Steam 截图下载异常，保留旧截图 item_id=%s", item_id)
+
 			try:
-				local_screenshots = self._save_steam_screenshots(
-					item_id, screenshot_urls, client
+				self.repository.apply_steam_metadata(
+					item_id,
+					steam_appid=appid,
+					release_date=release_date,
+					screenshots_json=screenshots_json,
+					metacritic=int(detail.get("metacritic", 0) or 0),
+					developer=developer,
+					publisher=publisher,
+					genres=genres,
+					description=desc,
+					release_year=year or None,
 				)
 			except Exception:
-				logger.exception("Steam 截图下载失败 item_id=%s", item_id)
+				# 数据库写入失败，回滚文件
+				rollback_game = self.repository.get_game(item_id)
+				rollback_base = (
+					self.media.game_asset_dir(rollback_game)
+					if rollback_game is not None
+					else self.media.covers_root / "games" / str(item_id)
+				)
+				target_dir = rollback_base / "screenshots"
+				if backup_dir and backup_dir.is_dir():
+					# 情况 A：原有旧目录，恢复旧目录
+					if target_dir.is_dir():
+						shutil.rmtree(target_dir, ignore_errors=True)
+					try:
+						backup_dir.rename(target_dir)
+						logger.info("数据库更新失败，已回滚截图目录: %s", item_id)
+					except OSError:
+						logger.exception("数据库更新失败且回滚截图目录失败: %s", item_id)
+				else:
+					# 情况 B：原本没有截图目录，直接清理刚生成的新目录
+					if target_dir.is_dir():
+						shutil.rmtree(target_dir, ignore_errors=True)
+						logger.info("数据库更新失败，已清理新生成的截图目录: %s", item_id)
+				raise
 
-		import json as _json
-		self.repository.apply_steam_metadata(
-			item_id,
-			steam_appid=appid,
-			release_date=release_date,
-			screenshots_json=_json.dumps(local_screenshots, ensure_ascii=False),
-			metacritic=int(detail.get("metacritic", 0) or 0),
-			developer=developer,
-			publisher=publisher,
-			genres=genres,
-			description=desc,
-			release_year=year or None,
-		)
-		return {
-			"applied": True,
-			"screenshots_count": len(local_screenshots),
-			"videos_count": 0,
-		}
+			# 数据库写入成功，清理备份
+			if backup_dir and backup_dir.is_dir():
+				shutil.rmtree(backup_dir, ignore_errors=True)
+
+			return {
+				"applied": True,
+				"screenshots_count": len(local_screenshots),
+				"videos_count": 0,
+			}
+		finally:
+			with self._scraping_lock:
+				self._scraping_games.discard(item_id)
 
 	def _save_icon_as_png(self, item_id: str, source: Path) -> None:
 		"""把下载的 icon 转成 PNG。SGDB 的 icon 是 ICO 格式，Godot 读不了。"""
@@ -1821,8 +2057,7 @@ class BackendApplication:
 		game = self.repository.get_game(item_id)
 		if game is None:
 			return
-		target_dir = self.media.covers_root / "games" / str(item_id)
-		target_dir.mkdir(parents=True, exist_ok=True)
+		target_dir = self.media.ensure_game_asset_dir(game)
 		target = target_dir / "icon.png"
 		# 清掉旧的 icon.* 文件（除了 .png 自己）
 		for old_ext in ("jpg", "jpeg", "webp", "bmp"):
@@ -1843,8 +2078,7 @@ class BackendApplication:
 		game = self.repository.get_game(item_id)
 		if game is None:
 			return
-		target_dir = self.media.covers_root / "games" / str(item_id)
-		target_dir.mkdir(parents=True, exist_ok=True)
+		target_dir = self.media.ensure_game_asset_dir(game)
 		# 按字节头判断扩展名
 		ext = "jpg"
 		if data[:8] == b"\x89PNG\r\n\x1a\n":
@@ -1868,50 +2102,121 @@ class BackendApplication:
 
 	def _save_steam_screenshots(
 		self, item_id: str, urls: list[str], client: SteamClient
-	) -> list[str]:
+	) -> tuple[list[str], Path | None]:
+		"""返回 (成功文件路径列表, 备份目录路径)。
+		如果有备份目录，调用方必须在数据库写入成功后负责清理，写入失败则负责回滚。
+		"""
+		if not urls:
+			return [], None
+
 		game = self.repository.get_game(item_id)
 		if game is None:
-			return []
-		target_dir = self.media.covers_root / "games" / str(item_id) / "screenshots"
-		# 清空旧目录
-		if target_dir.is_dir():
-			import shutil as _shutil
-			_shutil.rmtree(target_dir, ignore_errors=True)
-		target_dir.mkdir(parents=True, exist_ok=True)
+			return [], None
+		target_dir = self.media.ensure_game_asset_dir(game) / "screenshots"
+
+		import shutil as _shutil
+		import uuid as _uuid
+		
+		task_id = _uuid.uuid4().hex
+		temp_dir = target_dir.with_name(f"screenshots_tmp_{task_id}")
+		backup_dir = target_dir.with_name(f"screenshots_bak_{task_id}")
+
+		temp_dir.mkdir(parents=True, exist_ok=True)
 
 		from concurrent.futures import ThreadPoolExecutor, as_completed
 
 		def _one(idx_url: tuple[int, str]) -> tuple[int, str]:
 			idx, url = idx_url
 			try:
+				import io
+				from PIL import Image as PILImage
 				data = client.download_image(url)
-			except Exception:
-				return idx, ""
-			ext = "jpg"
-			if data[:8] == b"\x89PNG\r\n\x1a\n":
-				ext = "png"
-			target = target_dir / f"{idx + 1:02d}.{ext}"
-			try:
+				if not data:
+					return idx, ""
+				
+				# 第一次打开：验证文件结构并识别真实格式
+				with PILImage.open(io.BytesIO(data)) as img:
+					image_format = img.format
+					img.verify()
+					
+				# 第二次打开：实际解码像素数据
+				with PILImage.open(io.BytesIO(data)) as img:
+					img.load()
+					
+				# 只接受前端明确支持的图片格式
+				format_ext = {
+					"JPEG": "jpg",
+					"PNG": "png",
+					"WEBP": "webp",
+					"BMP": "bmp",
+				}
+				ext = format_ext.get(image_format)
+				if ext is None:
+					logger.warning(
+						"Steam 截图格式不受支持，丢弃: %s format=%s",
+						url, image_format,
+					)
+					return idx, ""
+					
+				target = temp_dir / f"{idx + 1:02d}.{ext}"
 				target.write_bytes(data)
-			except OSError:
+				return idx, str(target.name)
+			except Exception:
+				logger.warning(
+					"Steam 截图下载或解码失败: %s",
+					url,
+					exc_info=True,
+				)
 				return idx, ""
-			return idx, str(target).replace("\\", "/")
 
 		results: list[str] = [""] * len(urls)
 		with ThreadPoolExecutor(max_workers=6) as pool:
 			futures = [pool.submit(_one, (i, u)) for i, u in enumerate(urls)]
 			for f in as_completed(futures):
 				try:
-					idx, path = f.result()
-					results[idx] = path
+					idx, filename = f.result()
+					results[idx] = filename
 				except Exception:
 					continue
-		return [p for p in results if p]
+		
+		success_files = [p for p in results if p]
+		
+		# 严格全成功才替换
+		if len(success_files) < len(urls):
+			_shutil.rmtree(temp_dir, ignore_errors=True)
+			return [], None
+
+		# --- 两阶段替换：先备份旧目录，替换新目录，不删备份 ---
+		backed_up = False
+		if target_dir.is_dir():
+			try:
+				target_dir.rename(backup_dir)
+				backed_up = True
+			except OSError:
+				logger.exception("无法重命名旧截图目录，取消替换: %s", target_dir)
+				_shutil.rmtree(temp_dir, ignore_errors=True)
+				return [], None
+
+		try:
+			temp_dir.rename(target_dir)
+		except OSError:
+			logger.exception("新截图目录替换失败，尝试立即回滚: %s", target_dir)
+			if backed_up and backup_dir.is_dir():
+				try:
+					backup_dir.rename(target_dir)
+				except OSError:
+					logger.exception("回滚旧截图目录失败: %s", backup_dir)
+			_shutil.rmtree(temp_dir, ignore_errors=True)
+			return [], None
+
+		# 替换成功，把备份路径交还给上层，由上层决定清理还是回滚
+		return [str(target_dir / p).replace("\\", "/") for p in success_files], (backup_dir if backed_up else None)
 
 	@staticmethod
 	def _is_playable(game: dict) -> bool:
 		"""判定游戏是否有可用的启动方式。
-		无启动方式 → 视为"空壳"（粘贴建条目、只搬资料的老游戏）。
+		无启动方式，或启动文件在磁盘上已不存在 → 视为"空壳"（灰显、沉底）。
+		Steam 游戏按 appid 判定，不检查本地安装目录（由 Steam 客户端自行处理）。
 		"""
 		profile = str(game.get("profile_type", "direct") or "").lower()
 		launch_exe = str(game.get("launch_exe", "") or "").strip()
@@ -1922,50 +2227,106 @@ class BackendApplication:
 
 		if source == "steam" and steam_appid > 0:
 			return True
+
+		def _exists(path: str) -> bool:
+			# 卸载 / 移动目录后，路径字符串可能仍在库里，但文件已不存在。
+			if not path:
+				return False
+			try:
+				return Path(path).exists()
+			except OSError:
+				return False
+
 		if profile == "direct":
-			return bool(launch_exe) or bool(source_path)
+			# direct 模式：优先 launch_exe，退而用 source_path；两者都必须真实存在
+			if launch_exe:
+				return _exists(launch_exe)
+			return _exists(source_path)
 		if profile == "launcher":
-			return bool(launch_exe)
+			return _exists(launch_exe)
 		if profile == "emulator":
-			return bool(launch_exe) and bool(content_path)
+			# 模拟器：启动 exe 必须存在，内容路径（ROM 文件或 PS3 文件夹）也必须在
+			# Manual standalone packages can launch through their own EXE without a ROM.
+			# Scanned/managed ROM entries must still have a valid content path.
+			if not content_path and source == "manual":
+				return _exists(launch_exe)
+			return _exists(launch_exe) and _exists(content_path)
 		return False
 
-	def _legacy_game_dir(self, game: dict) -> Path | None:
-		"""Reuse legacy title directories only when no other game shares the title."""
-		title = str(game["title"])
-		if sum(str(g["title"]).casefold() == title.casefold()
-		       for g in self.repository.list_games()) != 1:
-			return None
-		return self.media.covers_root / "games" / sanitize_cover_stem(title)
+	def _collect_game_assets_before_rename(
+		self, game: dict
+	) -> tuple[dict[str, Path], list[tuple[Path, str]]]:
+		"""改名前收集现有素材：规范标题目录优先、旧 UUID 目录兜底，与读取顺序一致。
 
-	def _preserve_game_assets_before_rename(self, game: dict) -> None:
-		"""Copy title-based assets into stable ID storage without moving originals."""
-		old_dir = self._legacy_game_dir(game)
-		if old_dir is None or not old_dir.is_dir():
-			return
-		dest = self.media.covers_root / "games" / str(game["id"])
-		for source in old_dir.rglob("*"):
-			if not source.is_file():
+		只读收集，不删除、不移动任何文件；改名失败时原目录不受影响。
+		同名游戏共享的旧标题目录只在本游戏规范名命中时才收集（由分配器保证归属）。
+		"""
+		assets: dict[str, Path] = {}
+		screenshots: list[tuple[Path, str]] = []
+		seen_shots: set[str] = set()
+		for game_dir in self.media.game_asset_dirs(game):
+			if not game_dir.is_dir():
 				continue
-			rel = source.relative_to(old_dir)
-			target = dest / rel
+			for asset in ("cover", "backdrop", "logo", "icon"):
+				if asset in assets:
+					continue
+				for ext in self.media.SUPPORTED_COVER_EXTENSIONS:
+					candidate = game_dir / f"{asset}.{ext}"
+					if candidate.is_file():
+						assets[asset] = candidate
+						break
+			shots_dir = game_dir / "screenshots"
+			if not shots_dir.is_dir():
+				continue
+			for source in shots_dir.rglob("*"):
+				if not source.is_file():
+					continue
+				rel = str(source.relative_to(game_dir)).replace("\\", "/")
+				if rel.casefold() in seen_shots:
+					continue
+				seen_shots.add(rel.casefold())
+				screenshots.append((source, rel))
+		return assets, screenshots
+
+	def _restore_game_assets_after_rename(
+		self, item_id: str, assets: dict[str, Path], screenshots: list[tuple[Path, str]]
+	) -> None:
+		"""改名后把收集到的素材写进新标题目录，旧目录原样保留（迁移另行评估）。
+
+		平面素材走 set_game_asset：临时文件原子替换 + 同名旧扩展名清理；
+		截图按相对路径复制、已存在则跳过。单个素材失败只记日志，不中断其余。
+		"""
+		for asset, source in assets.items():
+			try:
+				self.media.set_game_asset(item_id, source, asset)
+			except Exception:
+				logger.exception(
+					"game asset restore failed: item=%s asset=%s", item_id, asset
+				)
+		if not screenshots:
+			return
+		game = self.repository.get_game(item_id)
+		if game is None:
+			return
+		shots_root = self.media.ensure_game_asset_dir(game)
+		for source, rel in screenshots:
+			target = shots_root / rel
 			if target.exists():
 				continue
-			target.parent.mkdir(parents=True, exist_ok=True)
-			shutil.copy2(source, target)
+			try:
+				target.parent.mkdir(parents=True, exist_ok=True)
+				shutil.copy2(source, target)
+			except OSError:
+				logger.exception("screenshot restore failed: %s", source)
 
 	def _game_to_dict(self, game: dict) -> dict[str, object]:
 		item_id = str(game["id"])
-		stem = sanitize_cover_stem(str(game["title"]))
-		games_dir = self.media.covers_root / "games"
 		cover_path: Path | None = None
 		backdrop_path: Path | None = None
 		logo_path: Path | None = None
 		icon_path: Path | None = None
-		game_dirs: list[Path] = [games_dir / item_id]
-		legacy = self._legacy_game_dir(game)
-		if legacy is not None:
-			game_dirs.append(legacy)
+		# 规范标题目录优先，旧 UUID 目录兜底——修复前写入的素材仍可读取。
+		game_dirs: list[Path] = self.media.game_asset_dirs(game)
 		for game_dir in game_dirs:
 			if not game_dir.is_dir():
 				continue
@@ -2076,7 +2437,7 @@ class BackendApplication:
 			"source": str(game.get("source", "manual") or "manual"),
 			"playtime_source": str(game.get("playtime_source", "g3") or "g3"),
 			"external_id": str(game.get("external_id", "") or ""),
-			"cover_dir": str(games_dir / stem).replace("\\", "/"),
+			"cover_dir": str(self.media.game_asset_dir(game)).replace("\\", "/"),
 			"namespace_id": str(game.get("namespace_id", "") or ""),
 			"artifact_id": str(game.get("artifact_id", "") or ""),
 			"release_date": str(game.get("release_date", "") or ""),
@@ -2092,17 +2453,4 @@ class BackendApplication:
 			"backdrop": [_p(backdrop_path)] if backdrop_path else [],
 			"logo": _p(logo_path),
 			"icon": _p(icon_path),
-		}
-
-	@staticmethod
-	def _theme_to_dict(manifest: ThemeManifest) -> dict[str, object]:
-		return {
-			"id": manifest.id,
-			"name": manifest.name,
-			"colors": manifest.colors,
-			"ambient": manifest.ambient,
-			"audio": manifest.audio,
-			"icons": manifest.icons,
-			"transitions": manifest.transitions,
-			"directory": str(manifest.directory),
 		}

@@ -46,4 +46,4 @@ def test_collection_world_uses_three_point_product_lighting_and_ambient_fill():
     assert "ambient_light_energy = 0.12" in text
     assert "environment.ssao_enabled = true" in text
     assert "ambient_light_sky_contribution = 0.0" in text
-    assert "rim_light.light_color = _theme_accent.lerp(Color.WHITE, 0.55)" in text
+    assert "rim_light.light_color = _ui_accent_color.lerp(Color.WHITE, 0.55)" in text

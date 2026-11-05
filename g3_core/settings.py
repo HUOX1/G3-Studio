@@ -10,18 +10,18 @@ DEFAULT_START_SECTIONS = {"games", "movies", "comics", "music", "system"}
 
 @dataclass(slots=True)
 class TerminalSettings:
-	settings_schema: int = 2
+	settings_schema: int = 3
 	display_mode: str = "borderless"
 	monitor: int = 0
 	preview_audio: bool = True
 	preview_volume: float = 0.25
 	preview_auto_play: bool = True
-	theme_music: bool = True
-	theme_music_volume: float = 0.35
+	ui_sfx: bool = True                        # UI 音效总开关
+	ui_sfx_overrides: dict[str, str] = field(default_factory=dict)
+	ui_sfx_volume: float = 0.6                 # UI 音效音量 0..1
 	restore_last_section: bool = False
 	default_start_section: str = "games"
 	restore_last_item: bool = True
-	current_theme: str = "classic_cyan"
 	fontset_id: str = "default"           # 电影板块字体组别（旧字段，保留兼容）
 	fontset_id_games: str = "default"     # 游戏板块字体组别
 	window_mode: str = "windowed"
@@ -59,10 +59,15 @@ class TerminalSettings:
 		if not isinstance(payload, dict):
 			raise ValueError("settings root must be an object")
 		payload = dict(payload)
-		if "settings_schema" not in payload:
-			if payload.get("current_theme") == "classic_violet":
-				payload["current_theme"] = "classic_cyan"
-			payload["settings_schema"] = 2
+		# Schema 3 removes the user-selectable application theme system.
+		# Discard its legacy keys while preserving all unrelated user settings.
+		for deprecated_key in ("current_theme", "theme_music", "theme_music_volume"):
+			payload.pop(deprecated_key, None)
+		try:
+			previous_schema = int(payload.get("settings_schema", 1))
+		except (TypeError, ValueError):
+			previous_schema = 1
+		payload["settings_schema"] = max(previous_schema, 3)
 		return cls.from_dict(payload)
 
 	def save(self, path: Path) -> None:
@@ -87,8 +92,12 @@ class TerminalSettings:
 			raise ValueError("monitor must be >= 0")
 		if not 0.0 <= self.preview_volume <= 1.0:
 			raise ValueError("preview_volume must be between 0 and 1")
-		if not 0.0 <= self.theme_music_volume <= 1.0:
-			raise ValueError("theme_music_volume must be between 0 and 1")
+		if not 0.0 <= self.ui_sfx_volume <= 1.0:
+			raise ValueError("ui_sfx_volume must be between 0 and 1")
+		if not isinstance(self.ui_sfx_overrides, dict):
+			raise ValueError("ui_sfx_overrides must be an object")
+		if any(k not in {"boot", "detail_in", "detail_out", "card_click", "game_launch", "drive_draw", "drive_read", "launch_unavailable", "sort_cycle", "section_switch", "drive_hover", "drive_signal"} or not isinstance(v, str) or len(v) > 512 or (v and not v.startswith("user://g3_ui_sfx/")) for k, v in self.ui_sfx_overrides.items()):
+			raise ValueError("invalid ui_sfx_overrides mapping")
 		if not isinstance(self.movie_library_paths, list):
 			raise ValueError("movie_library_paths must be a list")
 		for p in self.movie_library_paths:

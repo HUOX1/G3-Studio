@@ -82,6 +82,8 @@ var _hover_offset: Vector2 = Vector2.ZERO
 var _last_backdrop_key: String = ""
 var _last_scroll_msec: int = 0
 var _pending_backdrop_refresh: bool = false
+var _cover_reload_after_list_pending: bool = false
+var _backdrop_refresh_after_list_pending: bool = false
 var _backdrop_alpha: float = 0.0
 var _backdrop_alpha_target: float = 0.0
 var _backdrop_textures: Array[ImageTexture] = []
@@ -104,6 +106,24 @@ func configure(cam: Camera3D) -> void:
 	_build_ambient()
 	_build_backdrop()
 	get_viewport().size_changed.connect(_on_viewport_changed)
+
+func mark_cover_reload_after_list() -> void:
+	_cover_reload_after_list_pending = true
+
+func consume_cover_reload_after_list() -> bool:
+	if not _cover_reload_after_list_pending:
+		return false
+	_cover_reload_after_list_pending = false
+	return true
+
+func mark_backdrop_refresh_after_list() -> void:
+	_backdrop_refresh_after_list_pending = true
+
+func consume_backdrop_refresh_after_list() -> bool:
+	if not _backdrop_refresh_after_list_pending:
+		return false
+	_backdrop_refresh_after_list_pending = false
+	return true
 
 func set_movies(arr: Array[Dictionary]) -> void:
 	var need_rebuild: bool = _movies_list_changed(arr)
@@ -493,7 +513,8 @@ func reload_covers() -> void:
 		var card_w: float = CARD_WIDTH_DEFAULT
 		if not cover.is_empty() and FileAccess.file_exists(cover):
 			var img = Image.new()
-			if img.load(cover) == OK:
+			var reload_error: Error = img.load(cover)
+			if reload_error == OK:
 				img.generate_mipmaps()
 				mat.set_shader_parameter("albedo_tex", ImageTexture.create_from_image(img))
 				mat.set_shader_parameter("use_tex", 1.0)
@@ -811,6 +832,13 @@ func get_selected_card_screen_rect() -> Rect2:
 	var tl: Vector2 = camera.unproject_position(center + Vector3(-half_w, half_h, 0.0))
 	var br: Vector2 = camera.unproject_position(center + Vector3(half_w, -half_h, 0.0))
 	return Rect2(tl, br - tl)
+
+# UI-M4: Movie identity lookup belongs to the wall that owns the movie list.
+func find_index_by_id(item_id: String) -> int:
+	for i in range(movies.size()):
+		if str(movies[i].get("id", "")) == item_id:
+			return i
+	return -1
 
 func jump_to_index(index: int) -> void:
 	if movies.is_empty():

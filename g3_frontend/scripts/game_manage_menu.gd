@@ -1,5 +1,8 @@
-extends PopupPanel
+extends "res://scripts/game_menu_overlay.gd"
 class_name G3GameManageMenu
+
+## 游戏卡片右键菜单。WB-04.1-E：改为毛玻璃浮层（见 game_menu_overlay.gd），
+## 菜单项、顺序、间距与动作分发保持原样。
 
 signal action_requested(action: String)
 
@@ -14,29 +17,16 @@ const ACTIONS: Array[String] = [
 	"edit_playtime",
 	"remove",
 ]
+const MENU_WIDTH: float = 220.0
+const ITEM_FONT_SIZE: int = 14
 
-var _root: VBoxContainer
 var _action_buttons: Array[Button] = []
 
 func _ready() -> void:
 	name = "GameManageMenu"
-	size = Vector2i(220, 256)
-	_build_ui()
-	hide()
+	super()
 
-func _build_ui() -> void:
-	var margin := MarginContainer.new()
-	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 10)
-	margin.add_theme_constant_override("margin_top", 10)
-	margin.add_theme_constant_override("margin_right", 10)
-	margin.add_theme_constant_override("margin_bottom", 10)
-	add_child(margin)
-
-	_root = VBoxContainer.new()
-	_root.add_theme_constant_override("separation", 4)
-	margin.add_child(_root)
-
+func _build_content() -> void:
 	_add_action_button("从 SteamGridDB 获取素材…", 0)
 	_add_action_button("从 Steam 获取资料…", 1)
 	_add_action_button("编辑资料…", 2)
@@ -47,20 +37,11 @@ func _build_ui() -> void:
 	_add_action_button("修改游玩时长…", 7)
 	var sep := HSeparator.new()
 	_root.add_child(sep)
-	_add_action_button("移除", 8)
+	_add_action_button("移除", 8, true)
 
-func _add_action_button(label_text: String, action_id: int) -> void:
-	var button := Button.new()
-	button.text = label_text
-	button.flat = true
-	button.focus_mode = Control.FOCUS_NONE
-	button.custom_minimum_size = Vector2(200.0, 30.0)
-	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	button.add_theme_font_size_override("font_size", 14)
-	button.add_theme_color_override("font_color", Color(0.90, 0.90, 0.90))
-	button.add_theme_color_override("font_hover_color", Color(1.0, 1.0, 1.0))
+func _add_action_button(label_text: String, action_id: int, danger: bool = false) -> void:
+	var button: Button = make_item(label_text, ITEM_FONT_SIZE, Vector2(200.0, 30.0), danger)
 	button.pressed.connect(_on_action_pressed.bind(action_id))
-	_root.add_child(button)
 	_action_buttons.append(button)
 
 func show_at(screen_position: Vector2, can_edit_playtime: bool = true) -> void:
@@ -68,12 +49,10 @@ func show_at(screen_position: Vector2, can_edit_playtime: bool = true) -> void:
 	var idx: int = ACTIONS.find("edit_playtime")
 	if idx >= 0 and idx < _action_buttons.size():
 		_action_buttons[idx].visible = can_edit_playtime
-	position = Vector2i(int(screen_position.x), int(screen_position.y))
-	popup()
-	grab_focus()
+	show_menu_at(screen_position, MENU_WIDTH)
 
 func _on_action_pressed(action_id: int) -> void:
-	hide()
+	close()
 	if action_id < 0 or action_id >= ACTIONS.size():
 		return
 	action_requested.emit(ACTIONS[action_id])

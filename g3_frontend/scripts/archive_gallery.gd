@@ -153,8 +153,8 @@ func set_font_manager(manager: Node) -> void:
 func apply_fontset() -> void:
 	if _font_manager == null or _title == null:
 		return
-	var title_font: FontFile = _font_manager.get_font_for("game_title", "games")
-	var body_font: FontFile = _font_manager.get_font_for("game_meta", "games")
+	var title_font: Font = _font_manager.get_font_for("game_title", "games")
+	var body_font: Font = _font_manager.get_font_for("game_meta", "games")
 	if title_font != null:
 		_title.add_theme_font_override("font", title_font)
 	else:
@@ -164,6 +164,10 @@ func apply_fontset() -> void:
 			label.add_theme_font_override("font", body_font)
 		else:
 			label.remove_theme_font_override("font")
+		var field_key := "game_desc" if label == _description else "game_meta"
+		_font_manager.apply_style_to_control(label, field_key, "games")
+
+	_font_manager.apply_style_to_control(_title, "game_title", "games")
 	_resize()
 
 func _build_room() -> void:
@@ -502,8 +506,8 @@ func _finish_cover(path: String, stamp: int, image: Image) -> void:
 	var texture: Texture2D
 	if image != null:
 		texture = ImageTexture.create_from_image(image)
-	elif ClassDB.class_exists(&"AnimatedImageLoader"):
-		texture = ClassDB.class_call_static(&"AnimatedImageLoader", &"load_poster_from_file", path) as Texture2D
+	if texture == null:
+		texture = _load_cover_poster_fallback(path)
 	var listeners: Array = _loading.get(path, [])
 	_loading.erase(path)
 	if texture == null:
@@ -519,6 +523,38 @@ func _finish_cover(path: String, stamp: int, image: Image) -> void:
 		var node: Node3D = _cases[slot]["node"]
 		if int(node.get_meta("generation")) == int(listener["token"]) and str(node.get_meta("path")) == path:
 			_show_texture(slot, texture)
+
+func _load_cover_poster_fallback(path: String) -> Texture2D:
+	# 与游戏主海报墙保持一致：扩展的 poster 解码失败后继续尝试第 0 帧。
+	if ClassDB.class_exists(&"AnimatedImageLoader"):
+		var poster = ClassDB.class_call_static(&"AnimatedImageLoader", &"load_poster_from_file", path) as Texture2D
+		if poster != null:
+			return poster
+		var animated = ClassDB.class_call_static(&"AnimatedImageLoader", &"load_from_file", path)
+		if animated != null:
+			if animated.has_method("set_frame"):
+				animated.call("set_frame", 0)
+			if animated.has_method("get_frame_texture"):
+				var first_frame = animated.call("get_frame_texture", 0) as Texture2D
+				if first_frame != null:
+					return first_frame
+			if animated.has_method("get_poster_texture"):
+				var fallback_poster = animated.call("get_poster_texture") as Texture2D
+				if fallback_poster != null:
+					return fallback_poster
+
+	# Image.load 已在工作线程尝试过；这里用 WebP buffer API 兜底。
+	if path.get_extension().to_lower() == "webp":
+		var file := FileAccess.open(path, FileAccess.READ)
+		if file != null:
+			var bytes: PackedByteArray = file.get_buffer(file.get_length())
+			file.close()
+			if not bytes.is_empty():
+				var image := Image.new()
+				if image.load_webp_from_buffer(bytes) == OK and not image.is_empty():
+					image.generate_mipmaps()
+					return ImageTexture.create_from_image(image)
+	return null
 
 func _show_texture(slot: int, texture: Texture2D) -> void:
 	var material: ShaderMaterial = _cases[slot]["cover"]

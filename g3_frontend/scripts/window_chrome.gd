@@ -52,6 +52,12 @@ var _text_color: Color = Color(0.93, 1.0, 1.0, 1.0)
 var _muted_color: Color = Color(0.55, 0.70, 0.72, 1.0)
 var _accent_color: Color = Color(0.20, 0.82, 0.76, 1.0)
 var _base_color: Color = Color(0.025, 0.085, 0.105, 1.0)
+var _game_theme_color: Color = Color(0.08, 0.12, 0.17, 1.0)
+var _game_theme_mix: float = 0.0
+var _game_theme_tween: Tween = null
+# WB-04.1-B：菜单栏底色接管值（alpha = 0 表示未接管，沿用 base.darkened(0.24)）。
+# GAMES 板块由侧边栏广播"顶部实际合成色"写入，保证两块区域同色且过渡同步。
+var _bar_color_override: Color = Color(0.0, 0.0, 0.0, 0.0)
 var _is_maximized: bool = false
 
 func _ready() -> void:
@@ -69,6 +75,41 @@ func set_theme_colors(text: Color, muted: Color, accent: Color, base: Color) -> 
 	_base_color = base
 	if _title_bar != null:
 		_apply_theme()
+
+## WB-04.1-B：接管菜单栏底色（与侧边栏顶部完全一致）。
+## 传 alpha = 0 的颜色即恢复默认的 base.darkened(0.24) 计算方式。
+func set_bar_color(color: Color) -> void:
+	_bar_color_override = color
+	if _title_bar != null:
+		_apply_theme()
+
+func _bar_base_color() -> Color:
+	if _bar_color_override.a > 0.0:
+		return Color(_bar_color_override.r, _bar_color_override.g, _bar_color_override.b, 1.0)
+	return _base_color.darkened(0.24)
+
+func apply_game_theme_palette(palette: Dictionary) -> void:
+	var colors_value: Variant = palette.get("colors", palette)
+	var colors: Dictionary = colors_value as Dictionary if colors_value is Dictionary else {}
+	var accent_hex: String = str(colors.get("accent", "")).strip_edges()
+	var accent: Color = Color.from_string(accent_hex, Color(0.25, 0.40, 0.56)) if not accent_hex.is_empty() else Color(0.25, 0.40, 0.56)
+	_transition_game_theme(accent.darkened(0.48), 1.0)
+
+func reset_game_theme_palette() -> void:
+	_transition_game_theme(_game_theme_color, 0.0)
+
+func _transition_game_theme(target_color: Color, target_mix: float) -> void:
+	if _game_theme_tween != null and _game_theme_tween.is_valid():
+		_game_theme_tween.kill()
+	var start_color: Color = _game_theme_color
+	var start_mix: float = _game_theme_mix
+	_game_theme_tween = create_tween().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_game_theme_tween.tween_method(Callable(self, "_set_game_theme_state").bind(start_color, start_mix, target_color, target_mix), 0.0, 1.0, 0.68)
+
+func _set_game_theme_state(progress: float, start_color: Color, start_mix: float, target_color: Color, target_mix: float) -> void:
+	_game_theme_color = start_color.lerp(target_color, progress)
+	_game_theme_mix = lerpf(start_mix, target_mix, progress)
+	_apply_theme()
 
 func _build_title_bar() -> void:
 	_title_bar = Panel.new()
@@ -127,7 +168,12 @@ func _make_window_button(icon_type: String, slot_from_right: int) -> IconButton:
 
 func _apply_theme() -> void:
 	var bar_style: StyleBoxFlat = StyleBoxFlat.new()
-	bar_style.bg_color = _base_color.darkened(0.24)
+	var neutral_bar: Color = _bar_base_color()
+	if _bar_color_override.a > 0.0:
+		# 底色已被侧边栏接管（GAMES）：直接使用，叠色由侧边栏的过渡同步驱动。
+		bar_style.bg_color = neutral_bar
+	else:
+		bar_style.bg_color = neutral_bar.lerp(_game_theme_color, 0.62 * _game_theme_mix)
 	bar_style.border_width_bottom = 0
 	_title_bar.add_theme_stylebox_override("panel", bar_style)
 	_title_label.add_theme_color_override("font_color", _text_color)

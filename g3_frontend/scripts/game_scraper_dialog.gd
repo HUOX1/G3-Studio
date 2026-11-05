@@ -2,8 +2,9 @@ extends Window
 class_name G3GameScraperDialog
 
 signal search_requested(query: String)
-signal assets_requested(sgdb_id: int, asset_type: String)
-signal apply_requested(sgdb_id: int, asset_type: String, url: String)
+signal assets_requested(sgdb_id: int, asset_type: String, batch_id: String)
+signal asset_info_requested(url: String)
+signal apply_requested(item_id: String, sgdb_id: int, asset_type: String, url: String, operation_id: String)
 
 const ASSET_TYPES: Array[String] = ["grid", "hero", "logo", "icon"]
 const ASSET_LABELS: Dictionary = {
@@ -22,6 +23,24 @@ var _status_label: Label
 var _results_list: VBoxContainer
 var _apply_button: Button
 var _sections_root: VBoxContainer
+var _progress_root: VBoxContainer
+var _progress_stage: Label
+var _progress_bar: ProgressBar
+var _progress_detail: Label
+var _image_info_label: Label
+var _cancel_button: Button
+var _spinner_elapsed: float = 0.0
+var _spinner_frame: int = 0
+var _progress_caption: String = ""
+var _assets_batch_id: String = ""
+var _asset_responses: Dictionary = {}
+var _thumb_totals: Dictionary = {}
+var _thumb_progress: Dictionary = {}
+var _early_thumbs: Dictionary = {}
+var _apply_queue: Array[Dictionary] = []
+var _apply_index: int = 0
+var _apply_operation_id: String = ""
+var _apply_active: bool = false
 
 var _search_results: Array = []
 var _selected_sgdb_id: int = 0
@@ -82,6 +101,30 @@ func _build_ui() -> void:
 	_status_label.add_theme_color_override("font_color", Color(0.62, 0.78, 0.80))
 	root.add_child(_status_label)
 
+	# Embedded progress: indeterminate for network/search/encoding, real counts
+	# and bytes only when the backend provides measurable progress.
+	_progress_root = VBoxContainer.new()
+	_progress_root.add_theme_constant_override("separation", 3)
+	_progress_root.visible = false
+	root.add_child(_progress_root)
+	_progress_stage = Label.new()
+	_progress_stage.add_theme_font_size_override("font_size", 12)
+	_progress_stage.add_theme_color_override("font_color", Color(0.70, 0.88, 1.0))
+	_progress_root.add_child(_progress_stage)
+	_progress_bar = ProgressBar.new()
+	_progress_bar.custom_minimum_size = Vector2(0, 8)
+	_progress_bar.show_percentage = false
+	_progress_bar.indeterminate = true
+	_progress_root.add_child(_progress_bar)
+	_progress_detail = Label.new()
+	_progress_detail.add_theme_font_size_override("font_size", 11)
+	_progress_detail.add_theme_color_override("font_color", Color(0.57, 0.69, 0.76))
+	_progress_root.add_child(_progress_detail)
+	_image_info_label = Label.new()
+	_image_info_label.add_theme_font_size_override("font_size", 11)
+	_image_info_label.add_theme_color_override("font_color", Color(0.65, 0.78, 0.85))
+	root.add_child(_image_info_label)
+
 	var results_scroll := ScrollContainer.new()
 	results_scroll.custom_minimum_size = Vector2(0, 150)
 	results_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -123,10 +166,10 @@ func _build_ui() -> void:
 	buttons.alignment = BoxContainer.ALIGNMENT_END
 	root.add_child(buttons)
 
-	var cancel := Button.new()
-	cancel.text = "取消"
-	cancel.pressed.connect(hide)
-	buttons.add_child(cancel)
+	_cancel_button = Button.new()
+	_cancel_button.text = "取消"
+	_cancel_button.pressed.connect(hide)
+	buttons.add_child(_cancel_button)
 
 	_apply_button = Button.new()
 	_apply_button.text = "应用选中"
@@ -177,6 +220,183 @@ func _on_tab_pressed(asset_type: String) -> void:
 		var btn: Button = _tab_buttons[t]
 		btn.button_pressed = (t == asset_type)
 
+# ---------- 进度反馈 ----------
+
+func _process(delta: float) -> void:
+	if not _progress_root.visible:
+		return
+	_spinner_elapsed += delta
+	if _spinner_elapsed < 0.16:
+		return
+	_spinner_elapsed = 0.0
+	_spinner_frame = (_spinner_frame + 1) % 4
+	var frames: Array[String] = ["◐", "◓", "◑", "◒"]
+	_progress_stage.text = "%s  %s" % [frames[_spinner_frame], _progress_caption]
+
+func _show_progress(caption: String, detail: String = "", value: float = -1.0) -> void:
+	_progress_caption = caption
+	_progress_root.visible = true
+	_progress_stage.text = "◐  " + caption
+	_progress_detail.text = detail
+	_progress_bar.indeterminate = value < 0.0
+	if value >= 0.0:
+		_progress_bar.value = clampf(value, 0.0, 100.0)
+
+func _hide_progress() -> void:
+	_progress_root.visible = false
+	_progress_caption = ""
+
+func _format_bytes(count: int) -> String:
+	if count <= 0:
+		return "未知"
+	if count >= 1024 * 1024:
+		return "%.2f MB" % (float(count) / (1024.0 * 1024.0))
+	return "%.1f KB" % (float(count) / 1024.0)
+
+func _update_asset_progress() -> void:
+	if _apply_active:
+		return
+	var completed_lists: int = _asset_responses.size()
+	if completed_lists < ASSET_TYPES.size():
+		_show_progress("搜索素材 · 获取列表", "%d / %d 类素材已返回" % [completed_lists, ASSET_TYPES.size()], float(completed_lists) * 100.0 / float(ASSET_TYPES.size()))
+		return
+	var total: int = 0
+	var done: int = 0
+	for t in ASSET_TYPES:
+		total += int(_thumb_totals.get(t, 0))
+		done += mini(int(_thumb_progress.get(t, 0)), int(_thumb_totals.get(t, 0)))
+	if total > 0 and done < total:
+		_show_progress("下载缩略图", "%d / %d 张已处理" % [done, total], float(done) * 100.0 / float(total))
+	else:
+		_hide_progress()
+		_status_label.text = "素材已加载，点击选中后应用"
+
+func show_thumb_progress(payload: Dictionary) -> void:
+	if not visible or _apply_active:
+		return
+	if str(payload.get("batch_id", "")) != _assets_batch_id:
+		return
+	if int(payload.get("sgdb_id", 0)) != _selected_sgdb_id:
+		return
+	var t: String = str(payload.get("asset_type", ""))
+	if not _sections.has(t):
+		return
+	_thumb_progress[t] = maxi(int(_thumb_progress.get(t, 0)), int(payload.get("done", 0)))
+	var url: String = str(payload.get("url", ""))
+	var path: String = str(payload.get("thumb_local", ""))
+	if not path.is_empty():
+		_early_thumbs["%s:%s" % [t, url]] = path
+		_update_thumb_preview(t, url, path)
+	_update_asset_progress()
+
+func _update_thumb_preview(t: String, url: String, path: String) -> void:
+	var cards: Dictionary = _thumb_cards.get(t, {})
+	var btn: Button = cards.get(url, null)
+	if btn == null or not is_instance_valid(btn) or bool(btn.get_meta("preview_loaded", false)):
+		return
+	if not FileAccess.file_exists(path):
+		return
+	var img := Image.new()
+	if img.load(path) != OK:
+		return
+	var placeholder: Node = btn.get_node_or_null("G3Placeholder")
+	if placeholder != null:
+		placeholder.queue_free()
+	var tex_rect := TextureRect.new()
+	tex_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	tex_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	tex_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tex_rect.texture = ImageTexture.create_from_image(img)
+	tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(tex_rect)
+	btn.move_child(tex_rect, 0)
+	btn.set_meta("preview_loaded", true)
+
+func show_asset_info(data: Dictionary) -> void:
+	var url: String = str(data.get("url", ""))
+	if not visible or _active_tab != "hero":
+		return
+	if str(_sections["hero"].get("selected_url", "")) != url:
+		return
+	_image_info_label.text = "选中 Hero · 原图体积：%s" % _format_bytes(int(data.get("file_size", 0)))
+
+func show_apply_progress(payload: Dictionary) -> void:
+	if not visible or not _apply_active:
+		return
+	if str(payload.get("operation_id", "")) != _apply_operation_id:
+		return
+	if _apply_index >= _apply_queue.size():
+		return
+	var current: Dictionary = _apply_queue[_apply_index]
+	if str(payload.get("asset_type", "")) != str(current.get("type", "")):
+		return
+	var label: String = str(ASSET_LABELS.get(str(current.get("type", "")), "素材"))
+	var step: String = "%d / %d · %s" % [_apply_index + 1, _apply_queue.size(), label]
+	match str(payload.get("phase", "")):
+		"download":
+			var downloaded: int = int(payload.get("downloaded", 0))
+			var total: int = int(payload.get("total", 0))
+			var download_detail: String = "%s / %s" % [_format_bytes(downloaded), _format_bytes(total)] if total > 0 else "%s · 总量未知" % _format_bytes(downloaded)
+			_show_progress("下载原图 · " + step, download_detail, float(downloaded) * 100.0 / float(total) if total > 0 else -1.0)
+		"optimize":
+			var stage_name: String = str(payload.get("stage", ""))
+			var original_label: String = _format_bytes(int(payload.get("original_bytes", 0)))
+			match stage_name:
+				"decode":
+					var done: int = int(payload.get("done", 0))
+					var total: int = maxi(int(payload.get("total", 0)), 1)
+					_show_progress("优化动态封面 · " + step, "解析画面 %d / %d · 原图 %s" % [done, total, original_label], float(done) / float(total) * 70.0)
+				"encode":
+					_show_progress("优化动态封面 · " + step, "正在重新编码 · 原图 %s（此阶段无法精确计算百分比）" % original_label)
+				"verify":
+					_show_progress("优化动态封面 · " + step, "正在校验动画帧与时长")
+				"skipped_large_animation":
+					_show_progress("保留动态封面原图 · " + step, "动画规模过大，跳过压缩以保护内存")
+				_:
+					_show_progress("优化素材 · " + step, "原图 %s · 处理中" % original_label)
+		"save":
+			var original: int = int(payload.get("original_bytes", 0))
+			var final_size: int = int(payload.get("final_bytes", 0))
+			var save_detail: String = "%s → %s" % [_format_bytes(original), _format_bytes(final_size)] if bool(payload.get("optimized", false)) else "保留原图 · %s" % _format_bytes(original)
+			_show_progress("应用素材 · " + step, save_detail)
+			if str(current.get("type", "")) == "hero":
+				_image_info_label.text = "Hero 文件：" + save_detail
+
+func on_apply_result(asset_type: String, operation_id: String, ok: bool, data: Variant) -> bool:
+	if operation_id != _apply_operation_id:
+		return false
+	if not _apply_active or _apply_index >= _apply_queue.size():
+		return false
+	if str(_apply_queue[_apply_index].get("type", "")) != asset_type:
+		return false
+	if not ok:
+		_apply_active = false
+		_apply_button.text = "重试应用"
+		_apply_button.disabled = false
+		_cancel_button.disabled = false
+		_show_progress("应用失败", "素材未全部应用，请检查错误后重试", 0.0)
+		return false
+	_apply_index += 1
+	if _apply_index < _apply_queue.size():
+		_emit_next_apply()
+		return false
+	_apply_active = false
+	_apply_button.text = "应用选中"
+	_cancel_button.disabled = false
+	var summary: String = "全部 %d 项素材已保存" % _apply_queue.size()
+	if data is Dictionary and bool((data as Dictionary).get("optimized", false)):
+		summary += " · Hero 已优化"
+	_show_progress("应用完成", summary, 100.0)
+	return true
+
+func _emit_next_apply() -> void:
+	var current: Dictionary = _apply_queue[_apply_index]
+	_show_progress("准备下载 · %d / %d" % [_apply_index + 1, _apply_queue.size()])
+	apply_requested.emit(_item_id, _selected_sgdb_id, str(current["type"]), str(current["url"]), _apply_operation_id)
+
+func is_apply_active() -> bool:
+	return _apply_active
+
 # ---------- 搜索 ----------
 
 func show_for(item_id: String, game_title: String) -> void:
@@ -185,6 +405,13 @@ func show_for(item_id: String, game_title: String) -> void:
 	_query_field.text = game_title
 	_clear_results()
 	_clear_all_sections()
+	_assets_batch_id = ""
+	_apply_active = false
+	_apply_queue.clear()
+	_apply_button.text = "应用选中"
+	_cancel_button.disabled = false
+	_image_info_label.text = ""
+	_hide_progress()
 	_status_label.text = "点「搜索」开始"
 	_apply_button.disabled = true
 	popup_centered_clamped(size, 0.85)
@@ -196,7 +423,10 @@ func _on_search_pressed() -> void:
 		return
 	_clear_results()
 	_clear_all_sections()
+	_assets_batch_id = ""
 	_selected_sgdb_id = 0
+	_image_info_label.text = ""
+	_show_progress("搜索游戏", "正在连接 SteamGridDB…")
 	_apply_button.disabled = true
 	_status_label.text = "搜索中…"
 	search_requested.emit(q)
@@ -205,6 +435,7 @@ func show_search_results(results: Array) -> void:
 	_search_results = results
 	_clear_results()
 	if results.is_empty():
+		_hide_progress()
 		_status_label.text = "没找到。试试输入英文名（如 Silent Hill）"
 		return
 	_status_label.text = "找到 %d 个结果，如需换游戏请点其它条目" % results.size()
@@ -249,9 +480,16 @@ func _on_result_clicked(sgdb_id: int, btn: Button) -> void:
 	btn.add_theme_color_override("font_color", Color(1.0, 0.85, 0.45))
 	_selected_sgdb_id = sgdb_id
 	_clear_all_sections()
+	_assets_batch_id = "%d:%d" % [sgdb_id, Time.get_ticks_usec()]
+	_asset_responses.clear()
+	_thumb_totals.clear()
+	_thumb_progress.clear()
+	_early_thumbs.clear()
+	_image_info_label.text = ""
 	_status_label.text = "加载素材中…"
+	_update_asset_progress()
 	for t in ASSET_TYPES:
-		assets_requested.emit(sgdb_id, t)
+		assets_requested.emit(sgdb_id, t, _assets_batch_id)
 
 # ---------- 素材 ----------
 
@@ -265,7 +503,9 @@ func _clear_all_sections() -> void:
 		_thumb_cards[t] = {}
 	_apply_button.disabled = true
 
-func show_assets(asset_type: String, items: Array) -> void:
+func show_assets(asset_type: String, items: Array, batch_id: String) -> void:
+	if not visible or batch_id != _assets_batch_id or _apply_active:
+		return
 	if not _sections.has(asset_type):
 		return
 	var sec: Dictionary = _sections[asset_type]
@@ -273,6 +513,7 @@ func show_assets(asset_type: String, items: Array) -> void:
 	for c in row.get_children():
 		c.queue_free()
 	_thumb_cards[asset_type] = {}
+	var missing: int = 0
 	for raw in items:
 		if not (raw is Dictionary):
 			continue
@@ -281,11 +522,18 @@ func show_assets(asset_type: String, items: Array) -> void:
 		var url: String = str(item.get("url", ""))
 		if url.is_empty():
 			continue
+		var early_path: String = str(_early_thumbs.get("%s:%s" % [asset_type, url], ""))
+		if thumb_local.is_empty() and not early_path.is_empty():
+			thumb_local = early_path
+		if str(item.get("thumb_local", "")).is_empty():
+			missing += 1
 		var card := _make_thumb_card(asset_type, url, thumb_local, item)
 		row.add_child(card)
 		var cards: Dictionary = _thumb_cards[asset_type]
 		cards[url] = card
-	_status_label.text = "素材已加载，点击选中后应用"
+	_asset_responses[asset_type] = true
+	_thumb_totals[asset_type] = missing
+	_update_asset_progress()
 
 func _make_thumb_card(asset_type: String, url: String, thumb_local: String, item: Dictionary) -> Button:
 	var btn := Button.new()
@@ -318,10 +566,12 @@ func _make_thumb_card(asset_type: String, url: String, thumb_local: String, item
 			tex_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			btn.add_child(tex_rect)
 			thumb_loaded = true
+	btn.set_meta("preview_loaded", thumb_loaded)
 	if not thumb_loaded:
 		# 没缩略图:显示占位文字,让用户知道这是可点的按钮
 		var ph := Label.new()
-		ph.text = "无预览"
+		ph.name = "G3Placeholder"
+		ph.text = "加载中…"
 		ph.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		ph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		ph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
@@ -334,7 +584,8 @@ func _make_thumb_card(asset_type: String, url: String, thumb_local: String, item
 	var h: int = int(item.get("height", 0))
 	var size_text: String = "%dx%d" % [w, h] if w > 0 else "—"
 	var info := Label.new()
-	info.text = size_text
+	var file_size: int = int(item.get("file_size", 0))
+	info.text = "%s · %s" % [size_text, _format_bytes(file_size)] if file_size > 0 else size_text
 	info.anchor_left = 0.0
 	info.anchor_right = 1.0
 	info.anchor_top = 1.0
@@ -459,6 +710,11 @@ func _on_thumb_clicked(asset_type: String, url: String) -> void:
 				ss.set_corner_radius_all(4)
 				sov.add_theme_stylebox_override("panel", ss)
 	sec["selected_url"] = url
+	if asset_type == "hero":
+		_image_info_label.text = "选中 Hero · 正在获取原图体积…"
+		asset_info_requested.emit(url)
+	else:
+		_image_info_label.text = ""
 	_update_apply_button()
 
 func _update_apply_button() -> void:
@@ -473,19 +729,29 @@ func _update_apply_button() -> void:
 # ---------- 应用 ----------
 
 func _on_apply_pressed() -> void:
-	if _selected_sgdb_id <= 0:
+	if _selected_sgdb_id <= 0 or _apply_active:
 		return
-	# 立即反馈：禁用按钮 + 提示
-	_apply_button.disabled = true
-	_apply_button.text = "应用中…"
-	_status_label.text = "正在下载大图，请稍候…"
+	_apply_queue.clear()
 	for t in ASSET_TYPES:
 		var sec: Dictionary = _sections.get(t, {})
 		var url: String = str(sec.get("selected_url", ""))
-		if url.is_empty():
-			continue
-		apply_requested.emit(_selected_sgdb_id, t, url)
+		if not url.is_empty():
+			_apply_queue.append({"type": t, "url": url})
+	if _apply_queue.is_empty():
+		return
+	_apply_index = 0
+	_apply_operation_id = "%s:%d" % [_item_id, Time.get_ticks_usec()]
+	_apply_active = true
+	_apply_button.disabled = true
+	_apply_button.text = "应用中…"
+	_cancel_button.disabled = true
+	_status_label.text = "正在处理选中的素材…"
+	_emit_next_apply()
 
 func set_apply_done() -> void:
-	_status_label.text = "已应用"
+	_status_label.text = "素材已应用"
 	_apply_button.text = "应用选中"
+	var operation_id: String = _apply_operation_id
+	await get_tree().create_timer(0.85).timeout
+	if operation_id == _apply_operation_id and not _apply_active:
+		hide()

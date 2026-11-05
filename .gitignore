@@ -19,3 +19,5 @@ tmdb.json
 *.p12
 *.pfx
 secrets/
+.pytest_tmp/
+.workbuddy/

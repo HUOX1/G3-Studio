@@ -208,8 +208,10 @@ func _run() -> void:
 	_check(main.archive_gallery._status.text.contains("后端未连接"), "offline launch failure shown inside archive")
 	main._apply_section_now(2)
 	_check(not main.archive_gallery._active, "leaving stops archive")
-	_check(main.spatial_gallery.visible, "existing spatial section still enters")
+	_check(main.placeholder_label.visible, "COMICS section displays its placeholder")
+	_check(main.placeholder_label.text.contains("试验场"), "placeholder keeps the trial section label")
 	main._apply_section_now(0)
+	_check(not main.placeholder_label.visible, "leaving placeholder hides its label")
 	_check(main.game_section.visible, "main game section still enters")
 	main.queue_free()
 	await process_frame

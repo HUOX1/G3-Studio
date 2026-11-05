@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from pathlib import Path
 
 from .backend_app import BackendApplication
 from .logging_setup import configure_logging
@@ -17,8 +16,7 @@ async def run_backend() -> None:
         raise RuntimeError("G3_WS_TOKEN is required for standalone backend startup")
     paths = TerminalPaths.from_environment().ensure()
     configure_logging(paths.logs)
-    builtin_themes = Path(__file__).resolve().parent.parent / "g3_frontend" / "themes"
-    app = BackendApplication(paths, builtin_theme_root=builtin_themes)
+    app = BackendApplication(paths)
     app.initialize()
     app.start_background_tasks()
     server = TerminalWebSocketServer(app.handle_command, host=HOST, port=PORT, token=token)

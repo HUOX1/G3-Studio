@@ -18,11 +18,15 @@ var _was_open: bool = false
 var _pending_types: Dictionary = {}
 var _retry_elapsed: float = 0.0
 var _connect_started: bool = false
+# A monotonically increasing identity for each WebSocket connection attempt.
+# Event payloads are stamped locally; the backend does not control this field.
+var _connection_epoch: int = 0
 
 func _ready() -> void:
     set_process(true)
 
 func connect_backend() -> int:
+    _connection_epoch += 1
     _socket = WebSocketPeer.new()
     _socket.inbound_buffer_size = 8 * 1024 * 1024   # 8MB
     _socket.max_queued_packets = 4096
@@ -37,6 +41,13 @@ func connect_backend() -> int:
     var result: int = _socket.connect_to_url(BACKEND_URL)
     _connect_started = result == OK
     return result
+
+func connection_epoch() -> int:
+    return _connection_epoch
+
+func event_epoch_matches(payload: Dictionary) -> bool:
+    # Untagged/old-connection playback events must not mutate session ownership.
+    return _connection_epoch > 0 and int(payload.get("__g3_connection_epoch", -1)) == _connection_epoch
 
 func is_connected_to_backend() -> bool:
     return _socket.get_ready_state() == WebSocketPeer.STATE_OPEN and _handshake_confirmed
@@ -140,4 +151,6 @@ func _handle_text(text: String) -> void:
     var event_type: String = str(message.get("type", ""))
     var payload_value: Variant = message.get("payload", {})
     if not event_type.is_empty() and payload_value is Dictionary:
-        event_received.emit(event_type, payload_value as Dictionary)
+        var stamped_payload: Dictionary = (payload_value as Dictionary).duplicate()
+        stamped_payload["__g3_connection_epoch"] = _connection_epoch
+        event_received.emit(event_type, stamped_payload)

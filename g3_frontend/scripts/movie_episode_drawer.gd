@@ -177,6 +177,14 @@ func _ready() -> void:
 	set_process(true)
 
 func _build() -> void:
+	_build_drawer_frame()
+	_build_season_bar()
+	_build_episode_list()
+	_build_season_count()
+	_build_tooltip_layers()
+	_build_tooltip_body()
+
+func _build_drawer_frame() -> void:
 	_drawer = Control.new()
 	_drawer.mouse_filter = Control.MOUSE_FILTER_STOP
 	_drawer.gui_input.connect(_on_drawer_input)
@@ -236,6 +244,7 @@ func _build() -> void:
 	_handle_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_drawer.add_child(_handle_label)
 
+func _build_season_bar() -> void:
 	# ── 季号横向选择条 ──
 	_season_bar_root = Control.new()
 	_season_bar_root.anchor_right = 1.0
@@ -278,6 +287,7 @@ func _build() -> void:
 	_season_bar_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	season_pad.add_child(_season_bar_row)
 
+func _build_episode_list() -> void:
 	# ── 内容区（集数列表）──
 	_content = Control.new()
 	_content.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -295,6 +305,7 @@ func _build() -> void:
 	_list.mouse_filter = Control.MOUSE_FILTER_PASS
 	_content.add_child(_list)
 
+func _build_season_count() -> void:
 	# "共 x 季"——挂在季号条右侧，与季号条共存亡
 	_season_count_label = Label.new()
 	_season_count_label.anchor_left = 1.0
@@ -312,6 +323,7 @@ func _build() -> void:
 	_season_count_label.visible = false
 	_season_bar_root.add_child(_season_count_label)
 
+func _build_tooltip_layers() -> void:
 	# ── 每集简介漂浮窗（毛玻璃 + 上下光带）──
 
 	# 毛玻璃层（在 tooltip 主体下面）
@@ -364,6 +376,7 @@ func _build() -> void:
 	_tooltip_glow_bottom.material = _tooltip_glow_bottom_mat
 	add_child(_tooltip_glow_bottom)
 
+func _build_tooltip_body() -> void:
 	# tooltip 主体：透明 PanelContainer，只负责内边距和布局
 	_tooltip = PanelContainer.new()
 	_tooltip.mouse_filter = Control.MOUSE_FILTER_IGNORE

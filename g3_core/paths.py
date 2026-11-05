@@ -12,7 +12,6 @@ class TerminalPaths:
 	database: Path
 	assets: Path
 	cache: Path
-	themes: Path
 	logs: Path
 	settings: Path
 	covers: Path
@@ -34,7 +33,6 @@ class TerminalPaths:
 			database=root / "library.db",
 			assets=root / "assets",
 			cache=root / "cache",
-			themes=root / "themes",
 			logs=root / "logs",
 			settings=root / "settings.json",
 			covers=root / "covers",
@@ -51,7 +49,6 @@ class TerminalPaths:
 		for directory in (
 			self.assets,
 			self.cache,
-			self.themes,
 			self.logs,
 			self.covers,
 			self.covers_games,

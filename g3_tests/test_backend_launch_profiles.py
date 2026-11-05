@@ -13,21 +13,27 @@ def _paths(root: Path) -> TerminalPaths:
         database=root / "library.db",
         assets=root / "assets",
         cache=root / "cache",
-        themes=root / "themes",
         logs=root / "logs",
         settings=root / "settings.json",
+        covers=root / "covers",
+        covers_games=root / "covers/games",
+        covers_movies=root / "covers/movies",
+        media=root / "media",
+        tmdb_config=root / "tmdb.json",
+        sgdb_config=root / "sgdb.json",
+        psn_config=root / "psn.json",
     )
 
 
 @pytest.mark.asyncio
 async def test_backend_gets_and_updates_launch_profile(tmp_path):
-    app = BackendApplication(_paths(tmp_path / "G3"), builtin_theme_root=tmp_path / "builtin")
+    app = BackendApplication(_paths(tmp_path / "G3"))
     app.initialize()
     game = await app.handle_command(
         "game.create",
-        {"title": "Rain World", "executable_path": sys.executable},
+        {"title": "Rain World", "launch_exe": sys.executable},
     )
-    profile = await app.handle_command("game.launch_profile.get", {"id": game["id"]})
+    profile = (await app.handle_command("library.games.list", {}))[0]
     assert profile["profile_type"] == "direct"
     assert profile["launch_exe"] == str(Path(sys.executable).resolve())
 
@@ -51,4 +57,4 @@ async def test_backend_gets_and_updates_launch_profile(tmp_path):
     )
     assert updated["profile_type"] == "launcher"
     listed = await app.handle_command("library.games.list", {})
-    assert listed[0]["launch_profile"]["monitor_exe"] == str(monitor.resolve())
+    assert listed[0]["monitor_exe"] == str(monitor.resolve())

@@ -167,29 +167,40 @@ def test_ffmpeg_custom_executable_resolves_ffprobe(tmp_path, monkeypatch):
     assert calls[0][0] == str(tmp_path / 'ffprobe.exe')
 
 
-def test_game_assets_use_stable_id_and_legacy_rename_copy(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_game_rename_moves_assets_to_new_title_dir(tmp_path, monkeypatch):
+    """改名后素材迁入新标题目录；旧目录原样保留，UUID 目录不再参与。"""
     from g3_core.backend_app import BackendApplication
     from g3_core.paths import TerminalPaths
     monkeypatch.setenv('LOCALAPPDATA', str(tmp_path))
     paths = TerminalPaths.from_environment().ensure()
-    app = BackendApplication(paths, builtin_theme_root=tmp_path / 'builtin')
+    app = BackendApplication(paths)
     app.database.initialize()
     _item(app.repository, 'game-1', 'Old Title', 'game')
     old_dir = paths.covers / 'games' / 'Old Title'
     old_dir.mkdir(parents=True)
     (old_dir / 'cover.jpg').write_bytes(b'oldcover')
     (old_dir / 'backdrop.jpg').write_bytes(b'oldbackdrop')
-    app._preserve_game_assets_before_rename(app.repository.get_game('game-1'))
-    with app.database.connect() as conn:
-        conn.execute('UPDATE library_items SET title=? WHERE id=?', ('New Title', 'game-1'))
-    result = app._game_to_dict(app.repository.get_game('game-1'))
-    assert str(paths.covers / 'games' / 'game-1') in result['cover']
-    assert any(str(paths.covers / 'games' / 'game-1') in path for path in result['backdrop'])
+
+    result = await app.handle_command(
+        'game.metadata.update', {'id': 'game-1', 'title': 'New Title'}
+    )
+
+    new_dir = paths.covers / 'games' / 'New Title'
+    stable_dir = new_dir
+    assert Path(result['cover']).parent == stable_dir
+    assert any(Path(path).parent == stable_dir for path in result['backdrop'])
+    assert (new_dir / 'cover.jpg').read_bytes() == b'oldcover'
+    assert (new_dir / 'backdrop.jpg').read_bytes() == b'oldbackdrop'
+    # 旧目录只读保留，不由改名流程删除；UUID 目录不再被创建或写入。
     assert (old_dir / 'cover.jpg').read_bytes() == b'oldcover'
+    assert (old_dir / 'backdrop.jpg').read_bytes() == b'oldbackdrop'
+    assert not (paths.covers / 'games' / 'game-1').exists()
+
     new_source = tmp_path / 'new.png'
     new_source.write_bytes(b'newcover')
     target = app.media.set_game_cover('game-1', new_source)
-    assert target.parent.name == 'game-1'
+    assert target.parent.name == 'New Title'
     assert (old_dir / 'cover.jpg').read_bytes() == b'oldcover'
 
 
@@ -204,7 +215,7 @@ async def test_settings_ffmpeg_path_applies_at_start_and_update(tmp_path, monkey
     old = TerminalSettings.default().to_dict()
     old['ffmpeg_path'] = 'original-ffmpeg'
     paths.settings.write_text(json.dumps(old), encoding='utf-8')
-    app = BackendApplication(paths, builtin_theme_root=tmp_path / 'builtin')
+    app = BackendApplication(paths)
     app.initialize()
     assert app.media.ffmpeg_path == 'original-ffmpeg'
     await app.handle_command('settings.update', {'ffmpeg_path': 'custom-ffmpeg'})

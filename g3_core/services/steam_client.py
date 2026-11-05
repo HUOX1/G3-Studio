@@ -129,12 +129,25 @@ class SteamClient:
 			if isinstance(metacritic, dict) else 0
 		)
 
-		screenshots_raw = raw.get("screenshots", []) or []
-		screenshots = [
-			str(s.get("path_full", "") or "")
-			for s in screenshots_raw if isinstance(s, dict)
-		]
-		screenshots = [s for s in screenshots if s]
+		# 区分字段缺失、明确空列表、有效截图和异常数据
+		if "screenshots" not in raw:
+			screenshots = None
+		else:
+			screenshots_raw = raw.get("screenshots")
+			if screenshots_raw is None or not isinstance(screenshots_raw, list):
+				screenshots = None
+			elif not screenshots_raw:
+				# 只有明确返回空列表才表示无截图
+				screenshots = []
+			else:
+				parsed = [
+					str(s.get("path_full", "") or "").strip()
+					for s in screenshots_raw
+					if isinstance(s, dict)
+				]
+				parsed = [s for s in parsed if s]
+				# 非空原始列表却没有任何有效 URL，视为异常数据
+				screenshots = parsed if parsed else None
 
 		return {
 			"appid": int(raw.get("steam_appid", 0) or 0),

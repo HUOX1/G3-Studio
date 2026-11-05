@@ -301,3 +301,76 @@ class FontsetStoreRegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class FontsetTypographySettingsTests(unittest.TestCase):
+	"""新排印参数可保存、读取，并兼容旧版字体组别 JSON。"""
+
+	def setUp(self) -> None:
+		self._tmp = tempfile.TemporaryDirectory()
+		self.addCleanup(self._tmp.cleanup)
+		self.store = _make_store(Path(self._tmp.name))
+
+	def test_typography_settings_round_trip_and_clamp(self) -> None:
+		created = self.store.create("排印测试", scope="games")
+		fields = created.fields
+		fields["game_sidebar"].update({
+			"font_weight": 0.7,
+			"letter_spacing": 9,
+			"line_spacing": -3,
+			"font_color": "#ABCDEF",
+		})
+		saved = self.store.save(created.id, created.name, fields, "games")
+		loaded = self.store.get(saved.id, "games")
+		self.assertEqual(loaded.fields["game_sidebar"]["font_weight"], 0.7)
+		self.assertEqual(loaded.fields["game_sidebar"]["letter_spacing"], 4)
+		self.assertEqual(loaded.fields["game_sidebar"]["line_spacing"], 0)
+		self.assertEqual(loaded.fields["game_sidebar"]["font_color"], "#ABCDEF")
+
+	def test_second_round_color_and_spacing_settings_round_trip(self) -> None:
+		created = self.store.create("分色与间距", scope="games")
+		fields = created.fields
+		fields["game_sidebar"].update({
+			"font_color": "#C3CBD7",
+			"selected_color": "#F4F6FA",
+		})
+		fields["game_meta"].update({
+			"label_color": "#AAB4C2",
+			"value_color": "#D8DFE8",
+		})
+		fields["game_desc"].update({"line_spacing": 6, "paragraph_spacing": 18})
+		saved = self.store.save(created.id, created.name, fields, "games")
+		loaded = self.store.get(saved.id, "games")
+		self.assertEqual(loaded.fields["game_sidebar"]["selected_color"], "#F4F6FA")
+		self.assertEqual(loaded.fields["game_meta"]["label_color"], "#AAB4C2")
+		self.assertEqual(loaded.fields["game_meta"]["value_color"], "#D8DFE8")
+		self.assertEqual(loaded.fields["game_desc"]["paragraph_spacing"], 18)
+		self.assertEqual(loaded.fields["game_desc"]["line_spacing"], 6)
+
+	def test_invalid_optional_colors_fall_back_and_spacing_is_clamped(self) -> None:
+		created = self.store.create("参数边界", scope="games")
+		fields = created.fields
+		fields["game_sidebar"]["selected_color"] = "not-a-color"
+		fields["game_meta"]["label_color"] = "#12"
+		fields["game_meta"]["value_color"] = "#ABCDEF"
+		fields["game_desc"]["paragraph_spacing"] = 999
+		loaded = self.store.save(created.id, created.name, fields, "games")
+		self.assertEqual(loaded.fields["game_sidebar"]["selected_color"], "")
+		self.assertEqual(loaded.fields["game_meta"]["label_color"], "")
+		self.assertEqual(loaded.fields["game_meta"]["value_color"], "#ABCDEF")
+		self.assertEqual(loaded.fields["game_desc"]["paragraph_spacing"], 24)
+
+	def test_old_fontset_fields_receive_non_disruptive_defaults(self) -> None:
+		created = self.store.create("旧版兼容", scope="games")
+		path = self.store.root / f"{created.id}.json"
+		path.write_text(
+			'{"id":"%s","name":"旧版兼容","scope":"games",'
+			'"fields":{"game_sidebar":{"font_path":"","font_size":14}}}' % created.id,
+			encoding="utf-8",
+		)
+		loaded = self.store.get(created.id, "games")
+		entry = loaded.fields["game_sidebar"]
+		self.assertEqual(entry["font_weight"], 0.0)
+		self.assertEqual(entry["letter_spacing"], 0)
+		self.assertEqual(entry["line_spacing"], 0)
+		self.assertEqual(entry["font_color"], "")

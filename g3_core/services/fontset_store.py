@@ -102,11 +102,24 @@ class Fontset:
 		}
 
 
+def _clean_color(value: object) -> str:
+	color = str(value or "").strip()
+	return color if len(color) in (7, 9) and color.startswith("#") else ""
+
+
 def _make_default_fields(scope: str) -> dict[str, dict]:
 	keys = FIELD_KEYS_BY_SCOPE.get(scope, FIELD_KEYS_MOVIES)
 	fields: dict[str, dict] = {}
 	for key in keys:
-		fields[key] = {"font_path": "", "font_size": _DEFAULT_SIZES[key]}
+		entry = {"font_path": "", "font_size": _DEFAULT_SIZES[key], "font_weight": 0.0, "letter_spacing": 0, "line_spacing": 0, "font_color": ""}
+		if scope == "games" and key == "game_sidebar":
+			entry["selected_color"] = ""
+		if scope == "games" and key == "game_meta":
+			entry["label_color"] = ""
+			entry["value_color"] = ""
+		if key in ("movie_desc", "game_desc"):
+			entry["paragraph_spacing"] = 10
+		fields[key] = entry
 	return fields
 
 
@@ -219,18 +232,43 @@ class FontsetStore:
 		fields: dict[str, dict] = {}
 		for key in keys:
 			entry = raw_fields.get(key) if isinstance(raw_fields, dict) else None
-			if isinstance(entry, dict):
-				font_path = str(entry.get("font_path", "")).strip()
-				try:
-					font_size = int(entry.get("font_size", _DEFAULT_SIZES[key]))
-				except (ValueError, TypeError):
-					font_size = _DEFAULT_SIZES[key]
-				if font_size <= 0:
-					font_size = _DEFAULT_SIZES[key]
-			else:
-				font_path = ""
+			if not isinstance(entry, dict):
+				entry = {}
+			font_path = str(entry.get("font_path", "")).strip()
+			try:
+				font_size = int(entry.get("font_size", _DEFAULT_SIZES[key]))
+			except (ValueError, TypeError):
 				font_size = _DEFAULT_SIZES[key]
-			fields[key] = {"font_path": font_path, "font_size": font_size}
+			if font_size <= 0:
+				font_size = _DEFAULT_SIZES[key]
+			try:
+				font_weight = max(0.0, min(1.0, float(entry.get("font_weight", 0.0))))
+			except (ValueError, TypeError):
+				font_weight = 0.0
+			try:
+				letter_spacing = max(-2, min(4, int(entry.get("letter_spacing", 0))))
+			except (ValueError, TypeError):
+				letter_spacing = 0
+			try:
+				line_spacing = max(0, min(8, int(entry.get("line_spacing", 0))))
+			except (ValueError, TypeError):
+				line_spacing = 0
+			font_color = _clean_color(entry.get("font_color", ""))
+			clean_entry = {"font_path": font_path, "font_size": font_size,
+				"font_weight": font_weight, "letter_spacing": letter_spacing,
+				"line_spacing": line_spacing, "font_color": font_color}
+			if scope == "games" and key == "game_sidebar":
+				clean_entry["selected_color"] = _clean_color(entry.get("selected_color", ""))
+			if scope == "games" and key == "game_meta":
+				clean_entry["label_color"] = _clean_color(entry.get("label_color", ""))
+				clean_entry["value_color"] = _clean_color(entry.get("value_color", ""))
+			if key in ("movie_desc", "game_desc"):
+				try:
+					paragraph_spacing = int(entry.get("paragraph_spacing", 10))
+				except (ValueError, TypeError):
+					paragraph_spacing = 10
+				clean_entry["paragraph_spacing"] = max(0, min(24, paragraph_spacing))
+			fields[key] = clean_entry
 
 		return Fontset(id=fontset_id, name=name, scope=scope, fields=fields)
 
@@ -257,18 +295,43 @@ class FontsetStore:
 		safe_fields: dict[str, dict] = {}
 		for key in keys:
 			entry = fields.get(key) if isinstance(fields, dict) else None
-			if isinstance(entry, dict):
-				font_path = str(entry.get("font_path", "")).strip()
-				try:
-					font_size = int(entry.get("font_size", _DEFAULT_SIZES[key]))
-				except (ValueError, TypeError):
-					font_size = _DEFAULT_SIZES[key]
-				if font_size <= 0:
-					font_size = _DEFAULT_SIZES[key]
-			else:
-				font_path = ""
+			if not isinstance(entry, dict):
+				entry = {}
+			font_path = str(entry.get("font_path", "")).strip()
+			try:
+				font_size = int(entry.get("font_size", _DEFAULT_SIZES[key]))
+			except (ValueError, TypeError):
 				font_size = _DEFAULT_SIZES[key]
-			safe_fields[key] = {"font_path": font_path, "font_size": font_size}
+			if font_size <= 0:
+				font_size = _DEFAULT_SIZES[key]
+			try:
+				font_weight = max(0.0, min(1.0, float(entry.get("font_weight", 0.0))))
+			except (ValueError, TypeError):
+				font_weight = 0.0
+			try:
+				letter_spacing = max(-2, min(4, int(entry.get("letter_spacing", 0))))
+			except (ValueError, TypeError):
+				letter_spacing = 0
+			try:
+				line_spacing = max(0, min(8, int(entry.get("line_spacing", 0))))
+			except (ValueError, TypeError):
+				line_spacing = 0
+			font_color = _clean_color(entry.get("font_color", ""))
+			clean_entry = {"font_path": font_path, "font_size": font_size,
+				"font_weight": font_weight, "letter_spacing": letter_spacing,
+				"line_spacing": line_spacing, "font_color": font_color}
+			if clean_scope == "games" and key == "game_sidebar":
+				clean_entry["selected_color"] = _clean_color(entry.get("selected_color", ""))
+			if clean_scope == "games" and key == "game_meta":
+				clean_entry["label_color"] = _clean_color(entry.get("label_color", ""))
+				clean_entry["value_color"] = _clean_color(entry.get("value_color", ""))
+			if key in ("movie_desc", "game_desc"):
+				try:
+					paragraph_spacing = int(entry.get("paragraph_spacing", 10))
+				except (ValueError, TypeError):
+					paragraph_spacing = 10
+				clean_entry["paragraph_spacing"] = max(0, min(24, paragraph_spacing))
+			safe_fields[key] = clean_entry
 
 		fontset = Fontset(
 			id=clean_id, name=clean_name, scope=clean_scope, fields=safe_fields,
@@ -305,6 +368,11 @@ class FontsetStore:
 				k: {
 					"font_path": v.get("font_path", ""),
 					"font_size": v.get("font_size", _DEFAULT_SIZES[k]),
+					"font_weight": v.get("font_weight", 0.0),
+					"letter_spacing": v.get("letter_spacing", 0),
+					"line_spacing": v.get("line_spacing", 0),
+					"font_color": v.get("font_color", ""),
+					**{k: v[k] for k in ("selected_color", "label_color", "value_color", "paragraph_spacing") if k in v},
 				}
 				for k, v in source.fields.items()
 			}

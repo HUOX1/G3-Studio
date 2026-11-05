@@ -1,0 +1,30 @@
+Lucide icons — used by G3-Studio game section (WB-04)
+=====================================================
+
+The SVG files in this folder (games, movies, lab, music, system, add_circle,
+magnifier, sort_name, sort_playtime, sort_recent, game_count) are the official
+Lucide "Regular" shapes, bundled locally so the UI never needs a network
+request and never depends on the in-app icon lab download button.
+
+Source  : https://github.com/lucide-icons/lucide (lucide-static v1.63.0)
+License : ISC
+Changes : stroke colour changed to #FFFFFF so the app can tint the icon with
+          the current theme foreground; width/height attributes kept at 24.
+
+ISC License
+
+Copyright (c) for portions of Lucide are held by Cole Bemis 2013-2022 as part
+of Feather (MIT). All other copyright (c) for Lucide are held by Lucide
+Contributors 2022.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.

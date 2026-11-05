@@ -4,9 +4,17 @@ class_name G3NavigationDrawer
 signal section_requested(section_id: String)
 signal section_long_pressed(section_id: String)
 signal opened_changed(opened: bool)
+signal drawer_revealed
 
 const GLOW_SHADER: Shader = preload("res://shaders/glow_line.gdshader")
 const LONG_PRESS_SECONDS: float = 1.5
+
+# UI-M5: Shared navigation section display-name lookup.
+static func resolve_section_label(section: String, section_ids: Array[String], labels: Array[String]) -> String:
+	var index: int = section_ids.find(section)
+	if index >= 0 and index < labels.size():
+		return labels[index]
+	return section
 const ICON_FILL_SHADER: Shader = preload("res://shaders/icon_fill.gdshader")
 # 只有这些图标的"长按"才有意义（对应 main.gd 的切库逻辑）
 const LONG_PRESS_SECTIONS: Array[String] = ["MOVIES"]
@@ -55,13 +63,21 @@ const DRAWER_BUTTON: float = 44.0
 const DRAWER_BUTTON_GAP: float = 10.0
 const DRAWER_SIDE_PADDING: float = 16.0
 const DRAWER_VERTICAL_PADDING: float = 10.0
+# 图标实际显示尺寸 = 按钮 44 - 内缩 11×2 = 22px。
+# SVG 按这个像素栅格化（不再放大到 72px 再缩回），保证 20px 档位的线宽与边缘清晰。
+const DRAWER_ICON_INSET: float = 11.0
+const DRAWER_ICON_PX: float = DRAWER_BUTTON - DRAWER_ICON_INSET * 2.0
 
 const HOT_ZONE_WIDTH: float = 240.0
 const HOT_ZONE_HEIGHT: float = 36.0
 
 const DRAWER_BG: Color = Color(0.02, 0.06, 0.09, 0.55)
 
-const ACTIVE_GLOW_ALPHA: float = 0.20
+const INDICATOR_WIDTH: float = 22.0
+const INDICATOR_HEIGHT: float = 2.0
+const INDICATOR_BREATH_SPEED: float = 2.1
+const INDICATOR_ALPHA_MIN: float = 0.38
+const INDICATOR_ALPHA_MAX: float = 0.95
 const INACTIVE_DIM: float = 0.62
 
 # ============================================================
@@ -76,6 +92,7 @@ var _drawer_style: StyleBoxFlat
 var _row: HBoxContainer
 var _buttons: Dictionary = {}
 var _separators: Array[ColorRect] = []
+var _indicators: Dictionary = {}
 var _open: bool = false
 var _tween_drawer: Tween
 var _tween_glow: Tween
@@ -229,20 +246,24 @@ func _add_button(entry: Dictionary, is_last: bool) -> void:
 		_separators.append(sep)
 
 	var section_id: String = str(entry["id"])
-	button.tooltip_text = str(entry.get("tip", ""))
-	var icon_id: String = "spatial" if section_id == "COMICS" else section_id.to_lower()
+	# 主分区图标不再显示悬停文字提示：图标 + 高亮 + 选中态已足够表达语义。
+	# CONTENT_SECTIONS / SYSTEM_SECTIONS 里的 tip 数据保留，仅停止绑定到 tooltip；
+	# 其它界面控件的 tooltip 不受影响。
+	button.tooltip_text = ""
+	var icon_id: String = "lab" if section_id == "COMICS" else section_id.to_lower()
 	var texture := _load_icon(icon_id)
 	if texture != null:
 		var icon_rect := TextureRect.new()
 		icon_rect.texture = texture
 		icon_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-		icon_rect.offset_left = 11.0
-		icon_rect.offset_top = 11.0
-		icon_rect.offset_right = -11.0
-		icon_rect.offset_bottom = -11.0
+		icon_rect.offset_left = DRAWER_ICON_INSET
+		icon_rect.offset_top = DRAWER_ICON_INSET
+		icon_rect.offset_right = -DRAWER_ICON_INSET
+		icon_rect.offset_bottom = -DRAWER_ICON_INSET
 		icon_rect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 		icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 		icon_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		icon_rect.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 		icon_rect.modulate = Color(1, 1, 1, 1)
 		icon_rect.z_index = 2
 		var icon_mat := ShaderMaterial.new()
@@ -253,6 +274,22 @@ func _add_button(entry: Dictionary, is_last: bool) -> void:
 		icon_rect.material = icon_mat
 		icon_rect.set_meta("icon_mat", icon_mat)
 		button.add_child(icon_rect)
+
+	# Active section indicator is a thin line under the icon, not a button background.
+	var indicator := ColorRect.new()
+	indicator.anchor_left = 0.5
+	indicator.anchor_right = 0.5
+	indicator.anchor_top = 1.0
+	indicator.anchor_bottom = 1.0
+	indicator.offset_left = -INDICATOR_WIDTH * 0.5
+	indicator.offset_right = INDICATOR_WIDTH * 0.5
+	indicator.offset_top = -4.0
+	indicator.offset_bottom = -4.0 + INDICATOR_HEIGHT
+	indicator.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	indicator.color = _accent
+	indicator.visible = false
+	button.add_child(indicator)
+	_indicators[section_id] = indicator
 
 	button.button_down.connect(func(): _on_button_down(section_id))
 	button.button_up.connect(func(): _on_button_up(section_id))
@@ -271,9 +308,11 @@ func _load_icon(icon_id: String) -> Texture2D:
 	var svg_text: String = file.get_as_text()
 	file.close()
 	var image := Image.new()
-	var err: int = image.load_svg_from_string(svg_text, 3.0)
+	# 直接按 22px 显示尺寸栅格化，避免 72px → 22px 的二次缩放损失。
+	var err: int = image.load_svg_from_string(svg_text, DRAWER_ICON_PX / 24.0)
 	if err != OK:
 		return null
+	image.generate_mipmaps()
 	return ImageTexture.create_from_image(image)
 
 func _reveal() -> void:
@@ -301,6 +340,11 @@ func _reveal() -> void:
 	_tween_drawer.tween_property(_drawer, "offset_top", open_top, DRAWER_OPEN_DURATION).set_delay(DRAWER_OPEN_DELAY)
 	_tween_drawer.tween_property(_drawer, "offset_bottom", open_top + EXPANDED_HEIGHT, DRAWER_OPEN_DURATION).set_delay(DRAWER_OPEN_DELAY)
 	_tween_drawer.tween_property(_drawer, "modulate:a", 1.0, DRAWER_OPEN_DURATION).set_delay(DRAWER_OPEN_DELAY)
+	# 左侧卡片在抽屉展开到约 5% 时开始横向让位；上下让位仍先从 opened_changed 启动。
+	_tween_drawer.tween_callback(func():
+		if _open:
+			drawer_revealed.emit()
+	).set_delay(DRAWER_OPEN_DELAY + DRAWER_OPEN_DURATION * 0.05)
 	_tween_drawer.chain().tween_callback(func():
 		if _open:
 			_drawer.mouse_filter = Control.MOUSE_FILTER_STOP
@@ -340,6 +384,12 @@ func _close() -> void:
 func _process(delta: float) -> void:
 	if _glow == null or _hot_zone == null or _drawer == null:
 		return
+	# Active indicator breathes in alpha while retaining the current section tint.
+	var phase: float = Time.get_ticks_msec() / 1000.0 * INDICATOR_BREATH_SPEED
+	var alpha: float = lerpf(INDICATOR_ALPHA_MIN, INDICATOR_ALPHA_MAX, (sin(phase) + 1.0) * 0.5)
+	for indicator in _indicators.values():
+		if is_instance_valid(indicator) and indicator.visible:
+			indicator.modulate.a = alpha
 	# 长按计时
 	if _press_active:
 		_press_timer += delta
@@ -400,23 +450,15 @@ func _apply_button_styles() -> void:
 	for key: Variant in _buttons.keys():
 		var button: Button = _buttons[key]
 		var is_active: bool = str(key) == _current_section
-		var is_pressing: bool = str(key) == _pressing_section and _press_active
 		button.modulate.a = 1.0 if is_active else INACTIVE_DIM
-
-		var style := StyleBoxFlat.new()
-		if is_active or is_pressing:
-			var glow: Color = _accent
-			glow.a = ACTIVE_GLOW_ALPHA
-			style.bg_color = glow
-			style.set_corner_radius_all(8)
-		else:
-			style.bg_color = Color(0, 0, 0, 0)
-
-		button.add_theme_stylebox_override("normal", style)
-		button.add_theme_stylebox_override("hover", style)
-		button.add_theme_stylebox_override("pressed", style)
-		button.add_theme_stylebox_override("focus", style)
-		button.add_theme_stylebox_override("disabled", style)
+		# All button states stay transparent, including long-press.
+		var empty := StyleBoxEmpty.new()
+		for state in ["normal", "hover", "pressed", "focus", "disabled"]:
+			button.add_theme_stylebox_override(state, empty)
+		var indicator: ColorRect = _indicators.get(key, null)
+		if indicator != null:
+			indicator.visible = is_active
+			indicator.color = _accent
 
 func set_theme_colors(accent: Color, muted: Color) -> void:
 	_accent = accent
@@ -434,6 +476,9 @@ func set_theme_colors(accent: Color, muted: Color) -> void:
 			var mat: ShaderMaterial = icon_rect.get_meta("icon_mat", null)
 			if mat != null:
 				mat.set_shader_parameter("base_color", _muted)
+	for indicator in _indicators.values():
+		if is_instance_valid(indicator):
+			indicator.color = _accent
 	# 分隔线颜色同步
 	var sep_color: Color = _muted
 	sep_color.a = 0.18

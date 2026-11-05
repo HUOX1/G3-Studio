@@ -6,6 +6,7 @@ import random
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -17,12 +18,88 @@ logger = logging.getLogger("g3.media_assets")
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Windows 保留设备名不能作为文件/目录名，即使带扩展名也无效。
+_WINDOWS_RESERVED_NAMES = frozenset(
+	{"CON", "PRN", "AUX", "NUL"}
+	| {f"COM{i}" for i in range(1, 10)}
+	| {f"LPT{i}" for i in range(1, 10)}
+)
+
 
 def sanitize_cover_stem(title: str) -> str:
-	"""把电影标题转成合法文件名（去扩展名）。"""
+	"""把标题转成 Windows 合法的文件/目录名。"""
 	cleaned = _INVALID_FILENAME_CHARS.sub("_", title).strip()
 	cleaned = cleaned.rstrip(". ")
-	return cleaned or "Untitled"
+	if not cleaned:
+		return "Untitled"
+	if cleaned.split(".")[0].upper() in _WINDOWS_RESERVED_NAMES:
+		cleaned = "_" + cleaned
+	return cleaned
+
+
+def _asset_dir_candidates(game: dict, base: str) -> list[str]:
+	"""同名游戏的可读后缀候选，按"越简单越优先"排列。"""
+	year = game.get("release_year")
+	platform = str(game.get("platform") or "").strip()
+	candidates = [base]
+	if year:
+		candidates.append(f"{base} ({year})")
+	if platform:
+		candidates.append(f"{base} ({platform})")
+	if year and platform:
+		candidates.append(f"{base} ({year}, {platform})")
+	return candidates
+
+
+def assign_game_asset_names(games: list[dict]) -> dict[str, str]:
+	"""给同一标题下的若干条记录分配互不冲突的素材目录名。
+
+	排序键用 (created_at, id)：先入库的拿最朴素的标题名，后来的依次退到
+	「(年份)」→「(平台)」→「(年份, 平台)」→「(短 ID)」。新增同名游戏只会
+	排到队尾，不会挤掉已有目录名，因此重复刮削不会每次生成新目录。
+	"""
+	ordered = sorted(
+		games,
+		key=lambda g: (str(g.get("created_at") or ""), str(g.get("id") or "")),
+	)
+	used: set[str] = set()
+	names: dict[str, str] = {}
+	for game in ordered:
+		item_id = str(game.get("id") or "")
+		base = sanitize_cover_stem(str(game.get("title") or ""))
+		chosen: str | None = None
+		for candidate in _asset_dir_candidates(game, base):
+			key = candidate.casefold()
+			if key in used:
+				continue
+			chosen = candidate
+			break
+		if chosen is None:
+			# 最后保底：短 ID 后缀（可读、稳定，不是完整 UUID）
+			suffix = item_id.replace("-", "")[:6].upper() or "X"
+			chosen = f"{base} ({suffix})"
+			index = 2
+			while chosen.casefold() in used:
+				chosen = f"{base} ({suffix}-{index})"
+				index += 1
+		used.add(chosen.casefold())
+		names[item_id] = chosen
+	return names
+
+
+def game_asset_dir_for(repository: LibraryRepository, covers_root: Path, game: dict) -> Path:
+	"""游戏素材的规范目录：covers/games/<标题>[ (后缀)]。
+
+	UUID 只用于数据库主键与内部关联，不再作为素材目录名。
+	"""
+	title_key = str(game.get("title") or "").casefold()
+	siblings = [
+		row for row in repository.list_games()
+		if str(row.get("title") or "").casefold() == title_key
+	]
+	names = assign_game_asset_names(siblings or [game])
+	name = names.get(str(game.get("id") or "")) or sanitize_cover_stem(str(game.get("title") or ""))
+	return Path(covers_root) / "games" / name
 
 
 class MediaAssetService:
@@ -47,6 +124,45 @@ class MediaAssetService:
 		self.cache_root.mkdir(parents=True, exist_ok=True)
 		self.covers_root.mkdir(parents=True, exist_ok=True)
 		self.media_root.mkdir(parents=True, exist_ok=True)
+		# 标题 → {item_id: 目录名} 的短缓存，避免列表接口对每个游戏都全表扫描。
+		self._asset_name_cache: dict[str, dict[str, str]] = {}
+
+	def _asset_names_for(self, game: dict) -> dict[str, str]:
+		key = str(game.get("title") or "").casefold()
+		item_id = str(game.get("id") or "")
+		cached = self._asset_name_cache.get(key)
+		# 缓存必须包含当前游戏 id 才可用：改名/新增后旧缓存可能缺少该 id，
+		# 直接命中会把两个游戏指到同一个目录。
+		if cached is not None and item_id in cached:
+			return cached
+		siblings = [
+			row for row in self.repository.list_games()
+			if str(row.get("title") or "").casefold() == key
+		]
+		names = assign_game_asset_names(siblings or [game])
+		self._asset_name_cache[key] = names
+		return names
+
+	def game_asset_dir(self, game: dict) -> Path:
+		"""该游戏的规范素材目录（只算路径，不创建）。"""
+		names = self._asset_names_for(game)
+		name = names.get(str(game.get("id") or "")) or sanitize_cover_stem(str(game.get("title") or ""))
+		return self.covers_root / "games" / name
+
+	def game_asset_dirs(self, game: dict) -> list[Path]:
+		"""读取顺序：规范标题目录优先，旧 UUID 目录兜底（兼容历史素材）。"""
+		dirs = [self.game_asset_dir(game)]
+		legacy_id_dir = self.covers_root / "games" / str(game.get("id") or "")
+		if legacy_id_dir not in dirs:
+			dirs.append(legacy_id_dir)
+		return dirs
+
+	def ensure_game_asset_dir(self, game: dict) -> Path:
+		"""写入前调用：创建规范目录。新增/改名后失效缓存，保证同名分配最新。"""
+		self._asset_name_cache.pop(str(game.get("title") or "").casefold(), None)
+		target = self.game_asset_dir(game)
+		target.mkdir(parents=True, exist_ok=True)
+		return target
 
 	def _movie_asset_dir(self, movie: dict) -> Path:
 		# Only the known library scopes may form on-disk subdirectories.
@@ -262,6 +378,28 @@ class MediaAssetService:
 			raise RuntimeError(f"抽帧失败: {result.stderr[-300:]}")
 		temp.replace(output)
 
+	def _replace_asset(self, source: Path, target: Path, asset_name: str) -> Path:
+		"""Publish the new asset before removing any older-format asset."""
+		fd, temp_name = tempfile.mkstemp(prefix=f".{asset_name}.", suffix=".tmp", dir=target.parent)
+		os.close(fd)
+		temp_target = Path(temp_name)
+		try:
+			shutil.copy2(source, temp_target)
+			# An unsuccessful copy/replace must not remove the previous asset.
+			temp_target.replace(target)
+		finally:
+			temp_target.unlink(missing_ok=True)
+		for other_ext in self.SUPPORTED_COVER_EXTENSIONS:
+			if other_ext == target.suffix.lstrip("."):
+				continue
+			stale = target.parent / f"{asset_name}.{other_ext}"
+			if stale.is_file():
+				try:
+					stale.unlink()
+				except OSError:
+					logger.warning("Unable to remove superseded asset: %s", stale, exc_info=True)
+		return target
+
 	def set_movie_cover(self, item_id: str, source: Path) -> Path:
 		movie = self.repository.get_movie(item_id)
 		if movie is None:
@@ -277,22 +415,13 @@ class MediaAssetService:
 		covers_dir = self._movie_asset_dir(movie)
 		covers_dir.mkdir(parents=True, exist_ok=True)
 		target = covers_dir / f"cover.{ext}"
-		for other_ext in self.SUPPORTED_COVER_EXTENSIONS:
-			if other_ext != ext:
-				stale = covers_dir / f"cover.{other_ext}"
-				if stale.is_file():
-					stale.unlink()
-
-		temp_target = target.with_suffix(target.suffix + ".tmp")
-		shutil.copy2(source, temp_target)
-		temp_target.replace(target)
-		return target
+		return self._replace_asset(source, target, "cover")
 
 	def set_game_cover(self, item_id: str, source: Path) -> Path:
 		return self.set_game_asset(item_id, source, "")
 
 	def set_game_asset(self, item_id: str, source: Path, suffix: str = "") -> Path:
-		"""Write game assets to an immutable item ID directory."""
+		"""把游戏素材写入该游戏的规范标题目录（covers/games/<标题>）。"""
 		game = self.repository.get_game(item_id)
 		if game is None:
 			raise KeyError(item_id)
@@ -304,27 +433,13 @@ class MediaAssetService:
 		if ext not in self.SUPPORTED_COVER_EXTENSIONS:
 			raise ValueError(f"unsupported asset extension: {ext}")
 
-		games_dir = self.covers_root / "games"
-		target_dir = games_dir / str(item_id)
-		target_dir.mkdir(parents=True, exist_ok=True)
+		# 封面 / 背景 / Logo / 图标统一落在同一目录，不再按 UUID 分流。
+		target_dir = self.ensure_game_asset_dir(game)
 		# suffix 为空 → 主封面统一叫 cover
 		asset_name = suffix if suffix else "cover"
 		target = target_dir / f"{asset_name}.{ext}"
 
-		for other_ext in self.SUPPORTED_COVER_EXTENSIONS:
-			if other_ext == ext:
-				continue
-			stale = target_dir / f"{asset_name}.{other_ext}"
-			if stale.is_file():
-				try:
-					stale.unlink()
-				except OSError:
-					pass
-
-		temp_target = target.with_name(target.name + ".tmp")
-		shutil.copy2(source, temp_target)
-		temp_target.replace(target)
-		return target
+		return self._replace_asset(source, target, asset_name)
 
 	def set_movie_backdrop(self, item_id: str, source: Path) -> Path:
 		movie = self.repository.get_movie(item_id)
@@ -341,16 +456,7 @@ class MediaAssetService:
 		covers_dir = self._movie_asset_dir(movie)
 		covers_dir.mkdir(parents=True, exist_ok=True)
 		target = covers_dir / f"backdrop.{ext}"
-		for other_ext in self.SUPPORTED_COVER_EXTENSIONS:
-			if other_ext != ext:
-				stale = covers_dir / f"backdrop.{other_ext}"
-				if stale.is_file():
-						stale.unlink()
-
-		temp_target = target.with_suffix(target.suffix + ".tmp")
-		shutil.copy2(source, temp_target)
-		temp_target.replace(target)
-		return target
+		return self._replace_asset(source, target, "backdrop")
 	# ---------- 本地封面文件夹匹配 ----------
 
 	_SUPPORTED_COVER_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")

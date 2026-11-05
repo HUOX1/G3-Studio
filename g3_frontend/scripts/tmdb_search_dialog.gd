@@ -2,7 +2,7 @@ extends Window
 class_name G3TMDBDialog
 
 signal search_requested(query: String, media_type: String)
-signal apply_requested(tmdb_id: int, media_type: String)
+signal apply_requested(item_id: String, tmdb_id: int, media_type: String)
 
 var _item_id: String = ""
 var _target_title: String = ""
@@ -271,4 +271,4 @@ func _on_search_pressed() -> void:
 func _on_apply_pressed() -> void:
 	if _selected_tmdb_id <= 0:
 		return
-	apply_requested.emit(_selected_tmdb_id, _selected_media_type)
+	apply_requested.emit(_item_id, _selected_tmdb_id, _selected_media_type)

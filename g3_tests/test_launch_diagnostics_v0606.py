@@ -63,17 +63,6 @@ async def test_websocket_logs_command_exception_and_returns_message(caplog):
         await server.close()
 
 
-def test_old_violet_settings_migrate_once_to_cyan(tmp_path):
-    path = tmp_path / "settings.json"
-    old = TerminalSettings.default().to_dict()
-    old.pop("settings_schema", None)
-    old["current_theme"] = "classic_violet"
-    path.write_text(json.dumps(old), encoding="utf-8")
-    migrated = TerminalSettings.load(path)
-    assert migrated.current_theme == "classic_cyan"
-    assert migrated.settings_schema == 2
-
-
 def test_debug_launcher_enables_console_logging():
     batch = (Path(__file__).parents[1] / "run_windows_debug.bat").read_text(encoding="utf-8")
     logging_source = (Path(__file__).parents[1] / "g3_core/logging_setup.py").read_text(encoding="utf-8")

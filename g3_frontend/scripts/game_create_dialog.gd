@@ -9,6 +9,8 @@ var _title_field: LineEdit
 var _english_name_field: LineEdit
 var _platform_option: OptionButton
 var _profile_option: OptionButton
+var _emulator_mode_row: HBoxContainer
+var _emulator_mode_option: OptionButton
 var _emulator_row: HBoxContainer
 var _emulator_option: OptionButton
 var _emulator_readonly_hint: Label
@@ -21,6 +23,9 @@ var _args_row: HBoxContainer
 var _args_field: LineEdit
 var _working_row: HBoxContainer
 var _working_field: LineEdit
+var _monitor_row: HBoxContainer
+var _monitor_field: LineEdit
+var _monitor_dialog: FileDialog
 var _admin_check: CheckBox
 var _cover_label: Label
 var _cover_source: String = ""
@@ -115,6 +120,21 @@ func _build_ui() -> void:
 	_profile_option.item_selected.connect(_on_profile_changed)
 	profile_row.add_child(_profile_option)
 
+	# 集中管理与独立整合包共用 emulator 启动类型，不注册新模拟器。
+	_emulator_mode_row = HBoxContainer.new()
+	_emulator_mode_row.add_theme_constant_override("separation", 12)
+	root.add_child(_emulator_mode_row)
+	var mode_label := Label.new()
+	mode_label.text = "配置来源"
+	mode_label.custom_minimum_size = Vector2(100.0, 0.0)
+	_emulator_mode_row.add_child(mode_label)
+	_emulator_mode_option = OptionButton.new()
+	_emulator_mode_option.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_emulator_mode_option.add_item("集中管理（系统模拟器）")
+	_emulator_mode_option.add_item("独立整合包（自定义 EXE）")
+	_emulator_mode_option.item_selected.connect(_on_emulator_mode_changed)
+	_emulator_mode_row.add_child(_emulator_mode_option)
+
 	# 模拟器（仅「模拟器」模式下显示；选项来自系统页已配置的模拟器）
 	_emulator_row = HBoxContainer.new()
 	_emulator_row.add_theme_constant_override("separation", 12)
@@ -197,6 +217,10 @@ func _build_ui() -> void:
 	_emulator_readonly_hint.add_theme_color_override("font_color", Color(0.55, 0.62, 0.65))
 	root.add_child(_emulator_readonly_hint)
 
+	_monitor_row = _make_path_row("监视 EXE", func(): _open_picker("monitor"))
+	_monitor_field = _monitor_row.get_meta("field")
+	root.add_child(_monitor_row)
+
 	_admin_check = CheckBox.new()
 	_admin_check.text = "以管理员身份启动"
 	root.add_child(_admin_check)
@@ -247,37 +271,37 @@ func _build_ui() -> void:
 
 	_on_profile_changed(0)
 
+func _is_standalone_emulator() -> bool:
+	return _profile_option.selected == 1 and _emulator_mode_option.selected == 1
+
+func _on_emulator_mode_changed(_idx: int) -> void:
+	_on_profile_changed(_profile_option.selected)
+
 func _on_profile_changed(idx: int) -> void:
 	var is_direct: bool = (idx == 0)
 	var is_emulator: bool = (idx == 1)
 	var is_launcher: bool = (idx == 2)
-
-	# 未配置模拟器时禁用模拟器模式，回落直连
-	if is_emulator and _emulators.is_empty():
-		_profile_option.select(0)
-		is_direct = true
-		is_emulator = false
-		is_launcher = false
-		_show_error("尚未配置模拟器，请先到系统页「模拟器」区添加")
-
-	_emulator_row.visible = is_emulator
-	_emulator_readonly_hint.visible = is_emulator
-	_launch_exe_row.visible = (is_emulator or is_launcher)
-	# 「内容路径」行单独控制，不跟 is_emulator 直接挂钩：
-	# - 模拟器模式：游戏文件即内容路径，隐藏这一行（避免重复填写）
-	# - direct / launcher：保持原样不显示
-	_content_row.visible = false
+	var standalone: bool = is_emulator and _is_standalone_emulator()
+	_emulator_mode_row.visible = is_emulator
+	_emulator_row.visible = is_emulator and not standalone
+	_emulator_readonly_hint.visible = is_emulator and not standalone
+	_launch_exe_row.visible = is_emulator or is_launcher
+	# 集中管理：游戏文件即 ROM；独立整合包：允许单独内容路径或无镜像启动器。
+	_content_row.visible = standalone
 	_args_row.visible = not is_direct
 	_working_row.visible = not is_direct
 	_admin_check.visible = not is_direct
-
-	# 模拟器模式下这三个字段只读（来自模拟器配置）
-	_set_readonly(_launch_exe_field, is_emulator)
-	_set_readonly(_args_field, is_emulator)
-	_set_readonly(_working_field, is_emulator)
-
-	if is_emulator:
+	_monitor_row.visible = is_emulator or is_launcher
+	_set_readonly(_launch_exe_field, is_emulator and not standalone)
+	_set_readonly(_args_field, is_emulator and not standalone)
+	_set_readonly(_working_field, is_emulator and not standalone)
+	if is_emulator and not standalone:
 		_apply_selected_emulator()
+	elif standalone:
+		# Switching from a managed emulator must not reuse its EXE/arguments silently.
+		_launch_exe_field.text = ""
+		_args_field.text = ""
+		_working_field.text = ""
 
 func _set_readonly(field: LineEdit, readonly: bool) -> void:
 	field.editable = not readonly
@@ -326,7 +350,8 @@ func _selected_emulator() -> Dictionary:
 	return {}
 
 func _on_emulator_selected(_idx: int) -> void:
-	_apply_selected_emulator()
+	if not _is_standalone_emulator():
+		_apply_selected_emulator()
 
 func _apply_selected_emulator() -> void:
 	var emulator: Dictionary = _selected_emulator()
@@ -431,6 +456,9 @@ func _build_file_dialogs() -> void:
 	_launch_exe_dialog = _make_file_dialog(PackedStringArray(["*.exe ; 可执行文件", "* ; 所有文件"]))
 	_launch_exe_dialog.file_selected.connect(func(p): _launch_exe_field.text = p)
 	add_child(_launch_exe_dialog)
+	_monitor_dialog = _make_file_dialog(PackedStringArray(["*.exe ; 可执行文件", "* ; 所有文件"]))
+	_monitor_dialog.file_selected.connect(func(p): _monitor_field.text = p)
+	add_child(_monitor_dialog)
 
 	_content_dialog = _make_file_dialog(PackedStringArray([
 		"*.iso ; 镜像", "*.cue ; CUE", "*.bin ; BIN", "*.chd ; CHD",
@@ -477,6 +505,8 @@ func _open_picker(target: String) -> void:
 			_cover_dialog.popup_centered_ratio(0.82)
 		"working":
 			_working_dir_dialog.popup_centered_ratio(0.82)
+		"monitor":
+			_monitor_dialog.popup_centered_ratio(0.82)
 
 func _on_cover_selected(path: String) -> void:
 	_cover_source = path
@@ -495,6 +525,7 @@ func show_dialog(emulators: Array = []) -> void:
 		_platform_option.select(0)
 	_platform_auto = true
 	_profile_option.select(0)
+	_emulator_mode_option.select(0)
 	# 每次都重建下拉，避免上一次打开留下的过期选项
 	_populate_emulators(emulators)
 	_video_path.text = ""
@@ -502,6 +533,7 @@ func show_dialog(emulators: Array = []) -> void:
 	_content_path_field.text = ""
 	_args_field.text = ""
 	_working_field.text = ""
+	_monitor_field.text = ""
 	_admin_check.button_pressed = false
 	_cover_source = ""
 	_cover_label.text = "未选择"
@@ -536,7 +568,7 @@ func _submit() -> void:
 	if p_type == "direct" and video_text.is_empty():
 		_show_error("直接启动需要选择游戏 EXE")
 		return
-	if p_type == "emulator":
+	if p_type == "emulator" and not _is_standalone_emulator():
 		if _emulators.is_empty():
 			_show_error("尚未配置模拟器，请先到系统页「模拟器」区添加")
 			return
@@ -549,6 +581,12 @@ func _submit() -> void:
 		if _launch_exe_field.text.strip_edges().is_empty():
 			_show_error("所选模拟器没有配置启动 EXE，请先到系统页补上")
 			return
+	if p_type == "emulator" and _is_standalone_emulator() and _launch_exe_field.text.strip_edges().is_empty():
+		_show_error("独立整合包需要指定启动 EXE")
+		return
+	if p_type == "emulator" and _is_standalone_emulator() and _args_field.text.contains("{content}") and _content_path_field.text.strip_edges().is_empty():
+		_show_error("启动参数包含 {content}，请指定内容路径")
+		return
 	if p_type == "launcher" and _launch_exe_field.text.strip_edges().is_empty():
 		_show_error("启动器模式需要选择 launcher EXE")
 		return
@@ -559,8 +597,11 @@ func _submit() -> void:
 
 	# 模拟器模式：游戏文件即内容路径
 	var content_text: String = _content_path_field.text.strip_edges()
-	if p_type == "emulator":
+	if p_type == "emulator" and not _is_standalone_emulator():
 		content_text = video_text
+	elif p_type == "emulator":
+		# Preserve a supplied ROM, but allow a packaged EXE with no separate ROM.
+		video_text = content_text if not content_text.is_empty() else _launch_exe_field.text.strip_edges()
 
 	var payload: Dictionary = {
 		"title": title_text,
@@ -572,6 +613,7 @@ func _submit() -> void:
 		"content_path": content_text,
 		"launch_args": _args_field.text.strip_edges(),
 		"working_directory": _working_field.text.strip_edges(),
+		"monitor_exe": _monitor_field.text.strip_edges(),
 		"run_as_admin": _admin_check.button_pressed,
 		"cover_source": _cover_source,
 		"release_year": _year_field.text.strip_edges(),

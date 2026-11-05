@@ -7,7 +7,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 logger = logging.getLogger("g3.sgdb")
@@ -172,11 +172,25 @@ class SGDBClient:
 				"mime": mime,
 				"is_animated": is_animated,
 				"kind": extra_kind,
+				"file_size": int(it.get("file_size", 0) or 0) if str(it.get("file_size", "0") or "0").isdigit() else 0,
 			}
 			out.append(entry)
 		return out
 
-	def download_image(self, url: str) -> bytes:
+	def image_content_length(self, url: str) -> int:
+		"""Best-effort HEAD request for one selected original; never fetch the body."""
+		if not url:
+			return 0
+		req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+		try:
+			with urllib.request.urlopen(req, timeout=8.0) as resp:
+				return max(0, int(resp.headers.get("Content-Length", "0") or 0))
+		except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError):
+			return 0
+
+	def download_image(
+		self, url: str, progress: Callable[[int, int], None] | None = None,
+	) -> bytes:
 		if not url:
 			raise SGDBError("素材 URL 为空")
 		req = urllib.request.Request(
@@ -191,7 +205,17 @@ class SGDBClient:
 		)
 		try:
 			with urllib.request.urlopen(req, timeout=30.0) as resp:
-				return resp.read()
+				total = max(0, int(resp.headers.get("Content-Length", "0") or 0))
+				if progress is None:
+					return resp.read()
+				chunks: list[bytes] = []
+				downloaded = 0
+				progress(0, total)
+				while chunk := resp.read(256 * 1024):
+					chunks.append(chunk)
+					downloaded += len(chunk)
+					progress(downloaded, total)
+				return b"".join(chunks)
 		except urllib.error.HTTPError as exc:
 			raise SGDBError(f"下载素材失败：HTTP {exc.code}") from exc
 		except (urllib.error.URLError, TimeoutError, OSError) as exc:

@@ -15,14 +15,13 @@ def _paths(root: Path) -> TerminalPaths:
         database=root / "library.db",
         assets=root / "assets",
         cache=root / "cache",
-        themes=root / "themes",
         logs=root / "logs",
         settings=root / "settings.json",
     )
 
 
 def test_game_payload_uses_empty_string_for_missing_cover(tmp_path):
-    app = BackendApplication(_paths(tmp_path), builtin_theme_root=tmp_path / "builtin")
+    app = BackendApplication(_paths(tmp_path))
     app.initialize()
     game = app.repository.create_game(
         CreateGame(title="RainWorld", executable_path=Path(sys.executable))

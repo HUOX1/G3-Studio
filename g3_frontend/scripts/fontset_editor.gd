@@ -92,6 +92,7 @@ const FONT_NAME_KEYWORDS: Array[String] = [
 	# 霞鹜
 	"LXGW Bright",
 	"LXGW WenKai",
+	"MiSans",
 ]
 
 var _font_manager: Node
@@ -114,13 +115,36 @@ var _btn_new: Button
 var _btn_copy: Button
 var _btn_rename: Button
 var _btn_delete: Button
+var _advanced_popup: PopupPanel
+var _advanced_key: String = ""
+var _advanced_loading: bool = false
+var _weight_spin: SpinBox
+var _letter_spacing_spin: SpinBox
+var _line_spacing_spin: SpinBox
+var _color_picker: ColorPickerButton
+var _selected_color_picker: ColorPickerButton
+var _label_color_picker: ColorPickerButton
+var _value_color_picker: ColorPickerButton
+var _font_color_row: HBoxContainer
+var _selected_color_row: HBoxContainer
+var _label_color_row: HBoxContainer
+var _value_color_row: HBoxContainer
+var _paragraph_spacing_row: HBoxContainer
+var _paragraph_spacing_spin: SpinBox
+var _font_color_label: Label
 
 # 预览节点
 var _prev_top1: Label
 var _prev_title: Label
 var _prev_top3: Label
+var _prev_meta_row: HBoxContainer
+var _prev_meta_key: Label
+var _prev_meta_value: Label
 var _prev_desc: Label
 var _prev_mid: Label
+var _prev_sidebar_row: HBoxContainer
+var _prev_sidebar_normal: Label
+var _prev_sidebar_selected: Label
 var _prev_ui: Label
 
 func _ready() -> void:
@@ -280,6 +304,14 @@ func _build_ui() -> void:
 	top_group.add_child(_prev_title)
 	_prev_top3 = _make_preview_label("", HORIZONTAL_ALIGNMENT_RIGHT, inner_w)
 	top_group.add_child(_prev_top3)
+	_prev_meta_row = HBoxContainer.new()
+	_prev_meta_row.alignment = BoxContainer.ALIGNMENT_END
+	_prev_meta_row.add_theme_constant_override("separation", 6)
+	_prev_meta_key = _make_preview_label("", HORIZONTAL_ALIGNMENT_RIGHT, 140.0)
+	_prev_meta_value = _make_preview_label("", HORIZONTAL_ALIGNMENT_RIGHT, inner_w - 140.0)
+	_prev_meta_row.add_child(_prev_meta_key)
+	_prev_meta_row.add_child(_prev_meta_value)
+	top_group.add_child(_prev_meta_row)
 
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -294,9 +326,17 @@ func _build_ui() -> void:
 	bottom_group.add_child(_prev_desc)
 	_prev_mid = _make_preview_label("", HORIZONTAL_ALIGNMENT_LEFT, inner_w)
 	bottom_group.add_child(_prev_mid)
+	_prev_sidebar_row = HBoxContainer.new()
+	_prev_sidebar_row.add_theme_constant_override("separation", 12)
+	_prev_sidebar_normal = _make_preview_label("", HORIZONTAL_ALIGNMENT_LEFT, inner_w * 0.5)
+	_prev_sidebar_selected = _make_preview_label("", HORIZONTAL_ALIGNMENT_LEFT, inner_w * 0.5)
+	_prev_sidebar_row.add_child(_prev_sidebar_normal)
+	_prev_sidebar_row.add_child(_prev_sidebar_selected)
+	bottom_group.add_child(_prev_sidebar_row)
 	_prev_ui = _make_preview_label("", HORIZONTAL_ALIGNMENT_LEFT, inner_w)
 	bottom_group.add_child(_prev_ui)
 
+	_build_advanced_popup()
 	await get_tree().process_frame
 	await get_tree().process_frame
 	_update_preview()
@@ -329,6 +369,14 @@ func open_for(scope: String, fontset: Dictionary) -> void:
 		_current_fields[key] = {
 			"font_path": str(entry.get("font_path", "")),
 			"font_size": int(entry.get("font_size", DEFAULT_SIZES.get(key, 14))),
+			"font_weight": clampf(float(entry.get("font_weight", 0.0)), 0.0, 1.0),
+			"letter_spacing": clampi(int(entry.get("letter_spacing", 0)), -2, 4),
+			"line_spacing": clampi(int(entry.get("line_spacing", 0)), 0, 8),
+			"font_color": str(entry.get("font_color", "")),
+			"selected_color": str(entry.get("selected_color", "")),
+			"label_color": str(entry.get("label_color", "")),
+			"value_color": str(entry.get("value_color", "")),
+			"paragraph_spacing": clampi(int(entry.get("paragraph_spacing", 10)), 0, 24),
 		}
 
 	_scope_label.text = "电影" if _current_scope == SCOPE_MOVIES else "游戏"
@@ -384,10 +432,173 @@ func _rebuild_fields() -> void:
 		size_spin.value_changed.connect(_on_field_size_changed.bind(key))
 		row.add_child(size_spin)
 
-		_field_rows[key] = {"font_dropdown": font_dropdown, "size_spin": size_spin}
+		var advanced_button := Button.new()
+		advanced_button.text = "⋯"
+		advanced_button.tooltip_text = "高级排印设置"
+		advanced_button.custom_minimum_size.x = 30.0
+		advanced_button.pressed.connect(_open_advanced_popup.bind(key, advanced_button))
+		row.add_child(advanced_button)
+
+		_field_rows[key] = {"font_dropdown": font_dropdown, "size_spin": size_spin, "advanced_button": advanced_button}
 
 		var current_path: String = str(_current_fields.get(key, {}).get("font_path", ""))
 		_rebuild_font_dropdown_inner(font_dropdown, current_path)
+
+func _build_advanced_popup() -> void:
+	_advanced_popup = PopupPanel.new()
+	add_child(_advanced_popup)
+	var col := VBoxContainer.new()
+	col.add_theme_constant_override("separation", 8)
+	col.custom_minimum_size = Vector2(300, 0)
+	_advanced_popup.add_child(col)
+	var title := Label.new()
+	title.text = "高级排印设置"
+	col.add_child(title)
+	var weight_row := HBoxContainer.new()
+	var weight_label := Label.new()
+	weight_label.text = "字重补偿"
+	weight_label.custom_minimum_size.x = 100
+	weight_row.add_child(weight_label)
+	_weight_spin = SpinBox.new()
+	_weight_spin.min_value = 0.0
+	_weight_spin.max_value = 1.0
+	_weight_spin.step = 0.1
+	_weight_spin.value_changed.connect(_on_advanced_weight_changed)
+	weight_row.add_child(_weight_spin)
+	col.add_child(weight_row)
+	var letter_row := HBoxContainer.new()
+	var letter_label := Label.new()
+	letter_label.text = "字符间距"
+	letter_label.custom_minimum_size.x = 100
+	letter_row.add_child(letter_label)
+	_letter_spacing_spin = SpinBox.new()
+	_letter_spacing_spin.min_value = -2
+	_letter_spacing_spin.max_value = 4
+	_letter_spacing_spin.step = 1
+	_letter_spacing_spin.suffix = " px"
+	_letter_spacing_spin.value_changed.connect(_on_advanced_letter_spacing_changed)
+	letter_row.add_child(_letter_spacing_spin)
+	col.add_child(letter_row)
+	var line_row := HBoxContainer.new()
+	var line_label := Label.new()
+	line_label.text = "行距"
+	line_label.custom_minimum_size.x = 100
+	line_row.add_child(line_label)
+	_line_spacing_spin = SpinBox.new()
+	_line_spacing_spin.min_value = 0
+	_line_spacing_spin.max_value = 8
+	_line_spacing_spin.step = 1
+	_line_spacing_spin.suffix = " px"
+	_line_spacing_spin.value_changed.connect(_on_advanced_line_spacing_changed)
+	line_row.add_child(_line_spacing_spin)
+	col.add_child(line_row)
+	var color_controls := _make_advanced_color_row("字体颜色", "font_color", Color("#C6CDD6"))
+	_font_color_row = color_controls["row"]
+	_font_color_label = color_controls["label"]
+	_color_picker = color_controls["picker"]
+	col.add_child(_font_color_row)
+	var selected_controls := _make_advanced_color_row("选中项颜色", "selected_color", Color("#F4F6FA"))
+	_selected_color_row = selected_controls["row"]
+	_selected_color_picker = selected_controls["picker"]
+	col.add_child(_selected_color_row)
+	var label_controls := _make_advanced_color_row("元数据标签色", "label_color", Color("#AAB4C2"))
+	_label_color_row = label_controls["row"]
+	_label_color_picker = label_controls["picker"]
+	col.add_child(_label_color_row)
+	var value_controls := _make_advanced_color_row("元数据数值色", "value_color", Color("#D8DFE8"))
+	_value_color_row = value_controls["row"]
+	_value_color_picker = value_controls["picker"]
+	col.add_child(_value_color_row)
+	var paragraph_row := HBoxContainer.new()
+	_paragraph_spacing_row = paragraph_row
+	var paragraph_label := Label.new()
+	paragraph_label.text = "内容块间距"
+	paragraph_label.tooltip_text = "简介各文本与视频内容块之间的距离"
+	paragraph_label.custom_minimum_size.x = 100
+	paragraph_row.add_child(paragraph_label)
+	_paragraph_spacing_spin = SpinBox.new()
+	_paragraph_spacing_spin.min_value = 0
+	_paragraph_spacing_spin.max_value = 24
+	_paragraph_spacing_spin.step = 1
+	_paragraph_spacing_spin.suffix = " px"
+	_paragraph_spacing_spin.value_changed.connect(_on_advanced_paragraph_spacing_changed)
+	paragraph_row.add_child(_paragraph_spacing_spin)
+	col.add_child(paragraph_row)
+
+func _make_advanced_color_row(label_text: String, field_name: String, fallback: Color) -> Dictionary:
+	var row := HBoxContainer.new()
+	var label := Label.new()
+	label.text = label_text
+	label.custom_minimum_size.x = 100
+	row.add_child(label)
+	var picker := ColorPickerButton.new()
+	picker.color = fallback
+	picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	picker.color_changed.connect(_on_advanced_color_field_changed.bind(field_name))
+	row.add_child(picker)
+	var reset := Button.new()
+	reset.text = "默认"
+	reset.tooltip_text = "清除自定义颜色，恢复继承颜色"
+	reset.pressed.connect(_reset_advanced_color.bind(field_name, picker, fallback))
+	row.add_child(reset)
+	return {"row": row, "label": label, "picker": picker}
+
+func _open_advanced_popup(key: String, button: Button) -> void:
+	_advanced_key = key
+	var entry: Dictionary = _current_fields.get(key, {})
+	_advanced_loading = true
+	_weight_spin.value = float(entry.get("font_weight", 0.0))
+	_letter_spacing_spin.value = int(entry.get("letter_spacing", 0))
+	_line_spacing_spin.value = int(entry.get("line_spacing", 0))
+	_color_picker.color = Color.from_string(str(entry.get("font_color", "")), Color("#C6CDD6"))
+	_selected_color_picker.color = Color.from_string(str(entry.get("selected_color", "")), Color("#F4F6FA"))
+	_label_color_picker.color = Color.from_string(str(entry.get("label_color", "")), Color("#AAB4C2"))
+	_value_color_picker.color = Color.from_string(str(entry.get("value_color", "")), Color("#D8DFE8"))
+	_paragraph_spacing_spin.value = int(entry.get("paragraph_spacing", 10))
+	_advanced_loading = false
+	_font_color_label.text = "普通项颜色" if key == "game_sidebar" else ("默认颜色" if key == "game_meta" else "字体颜色")
+	_selected_color_row.visible = _current_scope == SCOPE_GAMES and key == "game_sidebar"
+	_label_color_row.visible = _current_scope == SCOPE_GAMES and key == "game_meta"
+	_value_color_row.visible = _current_scope == SCOPE_GAMES and key == "game_meta"
+	_paragraph_spacing_row.visible = key in ["game_desc", "movie_desc"]
+	var popup_height := 220.0
+	if _selected_color_row.visible:
+		popup_height += 48.0
+	if _label_color_row.visible:
+		popup_height += 96.0
+	if _paragraph_spacing_row.visible:
+		popup_height += 48.0
+	var popup_pos := button.global_position + Vector2(button.size.x + 6.0, 0.0)
+	_advanced_popup.popup(Rect2(popup_pos, Vector2(340.0, popup_height)))
+
+func _reset_advanced_color(field_name: String, picker: ColorPickerButton, fallback: Color) -> void:
+	if _advanced_loading or _advanced_key.is_empty() or not _current_fields.has(_advanced_key):
+		return
+	picker.color = fallback
+	_set_advanced_value(field_name, "")
+
+func _on_advanced_color_field_changed(value: Color, field_name: String) -> void:
+	_set_advanced_value(field_name, "#" + value.to_html(false))
+
+func _set_advanced_value(field: String, value: Variant) -> void:
+	if _advanced_loading or _advanced_key.is_empty() or not _current_fields.has(_advanced_key):
+		return
+	_current_fields[_advanced_key][field] = value
+	_mark_dirty()
+	if _preview_timer != null:
+		_preview_timer.start()
+
+func _on_advanced_weight_changed(value: float) -> void:
+	_set_advanced_value("font_weight", value)
+
+func _on_advanced_letter_spacing_changed(value: float) -> void:
+	_set_advanced_value("letter_spacing", int(value))
+
+func _on_advanced_line_spacing_changed(value: float) -> void:
+	_set_advanced_value("line_spacing", int(value))
+
+func _on_advanced_paragraph_spacing_changed(value: float) -> void:
+	_set_advanced_value("paragraph_spacing", int(value))
 
 func _rebuild_font_dropdown(key: String) -> void:
 	if not _field_rows.has(key):
@@ -481,15 +692,27 @@ func _apply_preview_text_for_scope() -> void:
 		_prev_top1.text = PREV_MOVIE_TOP1
 		_prev_title.text = PREV_MOVIE_TITLE
 		_prev_top3.text = PREV_MOVIE_TOP3
+		_prev_top3.visible = true
+		_prev_meta_row.visible = false
 		_prev_desc.text = PREV_MOVIE_DESC
 		_prev_mid.text = PREV_MOVIE_MID
+		_prev_mid.visible = true
+		_prev_sidebar_row.visible = false
 		_prev_ui.text = PREV_MOVIE_UI
 	else:
 		_prev_top1.text = PREV_GAME_TOP1
 		_prev_title.text = PREV_GAME_TITLE
 		_prev_top3.text = PREV_GAME_TOP3
+		_prev_top3.visible = false
+		_prev_meta_key.text = "开发商 / 发行"
+		_prev_meta_value.text = "Videocult · Adult Swim · 2017 · PC"
+		_prev_meta_row.visible = true
 		_prev_desc.text = PREV_GAME_DESC
 		_prev_mid.text = PREV_GAME_MID
+		_prev_mid.visible = false
+		_prev_sidebar_normal.text = "普通项：土豆兄弟"
+		_prev_sidebar_selected.text = "选中项：雨世界"
+		_prev_sidebar_row.visible = true
 		_prev_ui.text = PREV_GAME_UI
 
 func _update_preview() -> void:
@@ -517,6 +740,22 @@ func _update_preview() -> void:
 		}
 	for key in mapping.keys():
 		_apply_preview_style(mapping[key], key)
+	if _current_scope == SCOPE_GAMES:
+		_apply_preview_style(_prev_meta_key, "game_meta")
+		_apply_preview_style(_prev_meta_value, "game_meta")
+		_apply_preview_style(_prev_sidebar_normal, "game_sidebar")
+		_apply_preview_style(_prev_sidebar_selected, "game_sidebar")
+		var meta_entry: Dictionary = _current_fields.get("game_meta", {})
+		var base_meta_color := str(meta_entry.get("font_color", "")).strip_edges()
+		var meta_label_color := str(meta_entry.get("label_color", "")).strip_edges()
+		var meta_value_color := str(meta_entry.get("value_color", "")).strip_edges()
+		_prev_meta_key.add_theme_color_override("font_color", Color.from_string(meta_label_color, Color.from_string(base_meta_color, Color("#AAB4C2"))))
+		_prev_meta_value.add_theme_color_override("font_color", Color.from_string(meta_value_color, Color.from_string(base_meta_color, Color("#D8DFE8"))))
+		var sidebar_entry: Dictionary = _current_fields.get("game_sidebar", {})
+		var normal_color := str(sidebar_entry.get("font_color", "")).strip_edges()
+		var selected_color := str(sidebar_entry.get("selected_color", "")).strip_edges()
+		_prev_sidebar_normal.add_theme_color_override("font_color", Color.from_string(normal_color, Color("#C6CDD6")))
+		_prev_sidebar_selected.add_theme_color_override("font_color", Color.from_string(selected_color, Color("#F4F6FA")))
 
 func _apply_preview_style(label: Label, key: String) -> void:
 	if label == null:
@@ -528,12 +767,22 @@ func _apply_preview_style(label: Label, key: String) -> void:
 		label.remove_theme_font_override("font")
 	else:
 		if _font_manager != null and _font_manager.has_method("get_font_for_path"):
-			var f: FontFile = _font_manager.get_font_for_path(font_path)
-			if f != null:
-				label.add_theme_font_override("font", f)
+			var base_font: FontFile = _font_manager.get_font_for_path(font_path)
+			if base_font != null:
+				var styled_font := FontVariation.new()
+				styled_font.base_font = base_font
+				styled_font.variation_embolden = clampf(float(entry.get("font_weight", 0.0)), 0.0, 1.0)
+				styled_font.set_spacing(TextServer.SPACING_GLYPH, clampi(int(entry.get("letter_spacing", 0)), -2, 4))
+				label.add_theme_font_override("font", styled_font)
 			else:
 				label.remove_theme_font_override("font")
 	label.add_theme_font_size_override("font_size", font_size)
+	var color_hex := str(entry.get("font_color", "")).strip_edges()
+	if not color_hex.is_empty():
+		label.add_theme_color_override("font_color", Color.from_string(color_hex, Color.WHITE))
+	else:
+		label.remove_theme_color_override("font_color")
+	label.add_theme_constant_override("line_spacing", clampi(int(entry.get("line_spacing", 0)), 0, 8))
 
 # ──────────────── 信号输出 ────────────────
 

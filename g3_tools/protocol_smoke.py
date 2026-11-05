@@ -24,7 +24,6 @@ def _paths(base: Path) -> TerminalPaths:
         database=root / "library.db",
         assets=root / "assets",
         cache=root / "cache",
-        themes=root / "themes",
         logs=root / "logs",
         settings=root / "settings.json",
         covers=root / "covers",
@@ -42,7 +41,7 @@ async def smoke() -> None:
         base = Path(directory)
         builtin = base / "builtin-themes"
         builtin.mkdir()
-        app = BackendApplication(_paths(base), builtin_theme_root=builtin)
+        app = BackendApplication(_paths(base))
         app.initialize()
         token = "smoke-test-local-temporary-token-012345678901"
         server = TerminalWebSocketServer(app.handle_command, port=0, token=token)

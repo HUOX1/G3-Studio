@@ -1,0 +1,65 @@
+shader_type canvas_item;
+
+// CRT terminal wake-up entrance. The cover itself compresses to a horizontal
+// line, expands vertically, flashes briefly, and receives an internal scanline.
+// Outside the entrance, this shader only applies the existing saturation/brightness.
+uniform float saturation : hint_range(0.0, 1.0) = 1.0;
+uniform float brightness = 1.0;
+uniform bool crt_active = false;
+uniform float crt_progress : hint_range(0.0, 1.0) = 1.0;
+uniform float crt_scan_progress : hint_range(0.0, 1.0) = 1.0;
+uniform float crt_strength : hint_range(0.0, 1.0) = 0.65;
+uniform vec2 card_size = vec2(150.0, 200.0);
+
+void vertex() {
+    if (crt_active) {
+        vec2 center = card_size * 0.5;
+        float p = clamp(crt_progress, 0.0, 1.0);
+        float scale_x = mix(0.5, 1.0, smoothstep(0.0, 0.18, p));
+        float scale_y;
+        if (p < 0.18) {
+            scale_y = mix(0.005, 0.01, p / 0.18);
+        } else {
+            float expand = smoothstep(0.18, 0.55, p);
+            scale_y = mix(0.01, 1.0, expand);
+        }
+        VERTEX = center + (VERTEX - center) * vec2(scale_x, scale_y);
+    }
+}
+
+void fragment() {
+    vec4 tex = texture(TEXTURE, UV);
+    float lum = dot(tex.rgb, vec3(0.299, 0.587, 0.114));
+    vec3 color = mix(vec3(lum), tex.rgb, saturation) * brightness;
+
+    if (crt_active) {
+        float p = clamp(crt_progress, 0.0, 1.0);
+        float flash_brightness;
+        float contrast_boost = 1.0;
+        if (p < 0.18) {
+            flash_brightness = mix(9.0, 5.0, p / 0.18);
+        } else if (p < 0.55) {
+            flash_brightness = mix(5.0, 1.8, smoothstep(0.18, 0.55, p));
+            contrast_boost = mix(1.0, 2.0, smoothstep(0.18, 0.55, p));
+        } else {
+            flash_brightness = mix(1.8, 1.0, smoothstep(0.55, 1.0, p));
+            contrast_boost = mix(2.0, 1.0, smoothstep(0.55, 1.0, p));
+        }
+        flash_brightness = mix(1.0, flash_brightness, crt_strength);
+        contrast_boost = mix(1.0, contrast_boost, crt_strength);
+        color = (color - vec3(0.5)) * contrast_boost + vec3(0.5);
+        color *= flash_brightness;
+
+        float scan_phase = clamp(crt_scan_progress, 0.0, 1.0);
+        float scan_y = clamp((scan_phase - 0.08) / 0.71, 0.0, 1.0) * 0.98;
+        float scan_fade_in = smoothstep(0.0, 0.08, scan_phase);
+        float scan_fade_out = 1.0 - smoothstep(0.78, 1.0, scan_phase);
+        float scan_width = 3.0 / max(card_size.y, 1.0);
+        float scan_distance = abs(UV.y - scan_y);
+        float scan_band = 1.0 - smoothstep(scan_width, scan_width * 2.0, scan_distance);
+        float scan_alpha = scan_band * scan_fade_in * scan_fade_out * crt_strength;
+        color += vec3(0.25, 0.92, 1.0) * scan_alpha * 1.25;
+    }
+
+    COLOR = vec4(max(color, vec3(0.0)), tex.a);
+}

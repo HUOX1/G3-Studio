@@ -2,15 +2,19 @@ shader_type canvas_item;
 
 // G3 Space Atmosphere A1 - static ambient architecture.
 // No textures, no motion, no bloom dependency: intentionally gentle on the GPU.
-uniform vec4 top_color : source_color = vec4(0.115, 0.145, 0.190, 1.0);
-uniform vec4 bottom_color : source_color = vec4(0.055, 0.070, 0.095, 1.0);
+// WB-04: 略微提亮为低饱和灰蓝，明度整体高于侧边栏三段（#111923 / #141E2B / #1A2635），
+// 但保持在深色区间，不抢海报焦点。
+// WB-04.1-A: 在当前基础上整体下调约 5%（0.145→0.1378 / 0.125→0.1188 等比例缩放），
+// 色相、饱和度倾向、渐变形状与主题染色逻辑保持不变。
+uniform vec4 top_color : source_color = vec4(0.1378, 0.1938, 0.2717, 1.0);      // #232F45（原 #253449 ×0.95）
+uniform vec4 bottom_color : source_color = vec4(0.1188, 0.1672, 0.2309, 1.0);   // #1E2A3B（原 #202D3E ×0.95）
 uniform vec4 glow_color : source_color = vec4(0.38, 0.54, 0.73, 1.0);
-uniform float glow_amount : hint_range(0.0, 0.5) = 0.075;
+uniform float glow_amount : hint_range(0.0, 0.5) = 0.045;
 uniform float glow_pos_y : hint_range(0.0, 1.0) = 0.10;
 uniform float grain_amount : hint_range(0.0, 0.05) = 0.005;
 uniform vec4 warm_color : source_color = vec4(0.79, 0.52, 0.32, 1.0);
-uniform float warm_amount : hint_range(0.0, 0.15) = 0.016;
-uniform float edge_vignette : hint_range(0.0, 0.5) = 0.20;
+uniform float warm_amount : hint_range(0.0, 0.15) = 0.014;
+uniform float edge_vignette : hint_range(0.0, 0.5) = 0.10;
 
 float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);

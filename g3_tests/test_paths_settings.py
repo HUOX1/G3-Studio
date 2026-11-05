@@ -20,7 +20,7 @@ def test_terminal_paths_ensure_creates_runtime_directories(monkeypatch, tmp_path
     paths.ensure()
     assert paths.assets.is_dir()
     assert paths.cache.is_dir()
-    assert paths.themes.is_dir()
+    assert not (paths.root / "themes").exists()
     assert paths.logs.is_dir()
 
 
@@ -61,3 +61,21 @@ def test_default_start_section_defaults_to_games_and_validates(tmp_path):
         assert "default_start_section" in str(exc)
     else:
         raise AssertionError("invalid default start section accepted")
+
+def test_legacy_application_theme_settings_are_removed_on_load(tmp_path):
+    path = tmp_path / "settings.json"
+    old = TerminalSettings.default().to_dict()
+    old["settings_schema"] = 2
+    old["current_theme"] = "classic_violet"
+    old["theme_music"] = False
+    old["theme_music_volume"] = 0.8
+    old["window_mode"] = "fullscreen"
+    path.write_text(json.dumps(old), encoding="utf-8")
+
+    migrated = TerminalSettings.load(path)
+
+    assert migrated.settings_schema == 3
+    assert migrated.window_mode == "fullscreen"
+    assert "current_theme" not in migrated.to_dict()
+    assert "theme_music" not in migrated.to_dict()
+    assert "theme_music_volume" not in migrated.to_dict()

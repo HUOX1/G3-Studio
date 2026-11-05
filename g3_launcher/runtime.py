@@ -36,12 +36,11 @@ async def run_terminal(
     runtime_paths.ensure()
     configure_logging(runtime_paths.logs)
 
-    builtin_themes = repository_root / "g3_frontend" / "themes"
     frontend = repository_root / "g3_frontend"
     if not (frontend / "project.godot").is_file():
         raise FileNotFoundError(frontend / "project.godot")
 
-    app = BackendApplication(runtime_paths, builtin_theme_root=builtin_themes)
+    app = BackendApplication(runtime_paths)
     app.initialize()
     app.start_background_tasks()
     godot_executable = resolve_godot_executable(app.settings)

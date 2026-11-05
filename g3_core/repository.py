@@ -683,8 +683,9 @@ class LibraryRepository:
 					(release_date, item_id),
 				)
 			if screenshots_json:
+				# 截图属于每次刮削都会重新下载并重建的资源，不走「只填空不覆盖」逻辑
 				conn.execute(
-					"UPDATE game_metadata SET screenshots_json = ? WHERE item_id = ? AND (screenshots_json IS NULL OR screenshots_json = '')",
+					"UPDATE game_metadata SET screenshots_json = ? WHERE item_id = ?",
 					(screenshots_json, item_id),
 				)
 			if metacritic > 0:
@@ -725,7 +726,7 @@ class LibraryRepository:
 	@staticmethod
 	def _game_select_sql(where_clause: str = "") -> str:
 		return f"""
-			SELECT li.id, li.title, li.sort_title, li.description,
+			SELECT li.id, li.title, li.created_at, li.sort_title, li.description,
 				   li.source_path, li.offline,
 				   COALESCE(g.platform, '') AS platform,
 				   COALESCE(g.english_name, '') AS english_name,

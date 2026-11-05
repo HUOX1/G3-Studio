@@ -14,7 +14,8 @@ class ArchiveGalleryContract(unittest.TestCase):
     def test_existing_sections_and_backend_route_remain_connected(self):
         main = (ROOT / "g3_frontend/scripts/main.gd").read_text(encoding="utf-8")
         self.assertIn('archive_gallery.set_section_visible(section == "MUSIC")', main)
-        self.assertIn('spatial_gallery.set_section_visible(section == "COMICS")', main)
+        self.assertIn('placeholder_label.visible = section == "COMICS"', main)
+        self.assertNotIn('spatial_gallery', main)
         self.assertIn('archive_gallery.set_games(games)', main)
         self.assertIn('archive_gallery.game_launch_requested.connect(_on_archive_launch_requested)', main)
         handler = main.split('func _on_archive_launch_requested(', 1)[1].split('func _on_game_double_clicked(', 1)[0]

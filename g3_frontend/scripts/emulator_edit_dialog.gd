@@ -22,6 +22,8 @@ var _error_label: Label
 
 var _platforms: Array[String] = []
 var _scan_dirs: Array[String] = []
+# 点「编辑」时记录要替换的行；-1 表示下一次选择是「添加」
+var _editing_scan_index: int = -1
 
 var _executable_dialog: FileDialog
 var _working_dir_dialog: FileDialog
@@ -227,6 +229,8 @@ func _open_picker(target: String) -> void:
 		"working":
 			_working_dir_dialog.popup_centered_ratio(0.82)
 		"scan":
+			# 「+ 添加目录」走这里：确保不是替换模式
+			_editing_scan_index = -1
 			_scan_dir_dialog.popup_centered_ratio(0.82)
 
 # ---------------------------------------------------------------------------
@@ -241,6 +245,7 @@ func show_new() -> void:
 	_args_field.text = ""
 	_placeholder_field.text = DEFAULT_PLACEHOLDER
 	_scan_dirs.clear()
+	_editing_scan_index = -1
 	_rebuild_scan_list()
 	_rebuild_platforms("")
 	_finish_show("添加模拟器")
@@ -255,6 +260,7 @@ func show_emulator(emulator: Dictionary) -> void:
 	var placeholder: String = str(emulator.get("content_placeholder", "")).strip_edges()
 	_placeholder_field.text = placeholder if not placeholder.is_empty() else DEFAULT_PLACEHOLDER
 	_scan_dirs.clear()
+	_editing_scan_index = -1
 	var raw_dirs: Variant = emulator.get("scan_dirs", [])
 	if raw_dirs is Array:
 		for entry in (raw_dirs as Array):
@@ -323,20 +329,42 @@ func _make_scan_row(index: int, path: String) -> HBoxContainer:
 	label.add_theme_font_size_override("font_size", 13)
 	row.add_child(label)
 
+	var edit_btn := Button.new()
+	edit_btn.text = "编辑"
+	edit_btn.custom_minimum_size = Vector2(64.0, 28.0)
+	edit_btn.pressed.connect(_on_edit_scan_dir.bind(index))
+	row.add_child(edit_btn)
+
 	var remove_btn := Button.new()
 	remove_btn.text = "移除"
-	remove_btn.custom_minimum_size = Vector2(72.0, 28.0)
+	remove_btn.custom_minimum_size = Vector2(64.0, 28.0)
 	remove_btn.pressed.connect(_on_remove_scan_dir.bind(index))
 	row.add_child(remove_btn)
 	return row
+
+func _on_scan_dir_text_changed(new_text: String, index: int) -> void:
+	if index < 0 or index >= _scan_dirs.size():
+		return
+	_scan_dirs[index] = _clean_path(new_text)
 
 func _on_scan_dir_selected(path: String) -> void:
 	var clean: String = _clean_path(path)
 	if clean.is_empty():
 		return
-	if not _scan_dirs.has(clean):
-		_scan_dirs.append(clean)
+	if _editing_scan_index >= 0 and _editing_scan_index < _scan_dirs.size():
+		# 编辑模式：替换该行路径
+		_scan_dirs[_editing_scan_index] = clean
+		_editing_scan_index = -1
+	else:
+		if not _scan_dirs.has(clean):
+			_scan_dirs.append(clean)
 	_rebuild_scan_list()
+
+func _on_edit_scan_dir(index: int) -> void:
+	if index < 0 or index >= _scan_dirs.size():
+		return
+	_editing_scan_index = index
+	_scan_dir_dialog.popup_centered_ratio(0.82)
 
 func _on_remove_scan_dir(index: int) -> void:
 	if index < 0 or index >= _scan_dirs.size():

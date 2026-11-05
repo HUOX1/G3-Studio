@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from g3_core.repository import LibraryRepository
-from g3_core.services.media_assets import sanitize_cover_stem
+from g3_core.services.media_assets import (
+	MediaAssetService,
+	game_asset_dir_for,
+	sanitize_cover_stem,
+)
 from g3_core.services.vdf_parser import parse_vdf
 
 
@@ -26,8 +30,10 @@ class SteamLibraryScanner:
 	不落库、不改库，纯查询。
 	"""
 
-	def __init__(self, repository: LibraryRepository) -> None:
+	def __init__(self, repository: LibraryRepository, media: MediaAssetService | None = None) -> None:
 		self.repository = repository
+		# 注入 MediaAssetService 时，素材写入走统一接口（原子替换+旧扩展名清理）。
+		self.media = media
 
 	# ------------------------------------------------------------------
 	# 定位 Steam
@@ -363,10 +369,13 @@ class SteamLibraryScanner:
 	)
 
 	def _import_steam_assets(self, appid: int, game_title: str, item_id: str | None = None) -> dict:
-		"""从 Steam 缓存搬素材到 covers/games/<stem>/。
+		"""从 Steam 缓存搬素材到 covers/games/<标题>/。
 
-		目标已存在 → 跳过（不覆盖用户手动换的素材）；
+		目标已存在（任意扩展名，含旧 UUID 目录）→ 跳过，不覆盖用户手动换的素材；
 		源缺失 → 跳过该项。返回搬了哪些。
+		有 media 服务且游戏已入库时走 set_game_asset 统一写入：临时文件原子
+		替换、失败保留原文件、自动清理同名旧扩展名；否则退回直接复制（与
+		修复前行为一致）。
 		"""
 		result: dict[str, object] = {
 			"cover": False, "backdrop": False, "logo": False, "target_dir": "",
@@ -380,33 +389,47 @@ class SteamLibraryScanner:
 			return result
 
 		covers_root = Path(self.repository.database.path).parent / "covers"
-		target_dir = covers_root / "games" / (str(item_id) if item_id else sanitize_cover_stem(game_title))
-		try:
-			target_dir.mkdir(parents=True, exist_ok=True)
-		except OSError:
-			logger.exception("failed to create asset dir: %s", target_dir)
-			return result
+		asset_game = self.repository.get_game(str(item_id)) if item_id else None
+		if self.media is not None and asset_game is not None:
+			intended_dir = self.media.game_asset_dir(asset_game)
+			# 与刮削写入一致：守卫范围含规范标题目录与旧 UUID 目录，
+			# 避免新写的 cover.jpg 以更高扩展名优先级遮蔽用户保留的 cover.png。
+			guard_dirs = self.media.game_asset_dirs(asset_game)
+		else:
+			if asset_game is not None:
+				target_dir = game_asset_dir_for(self.repository, covers_root, asset_game)
+			else:
+				target_dir = covers_root / "games" / sanitize_cover_stem(game_title)
+			intended_dir = target_dir
+			guard_dirs = [target_dir]
+		written_dir: Path | None = None
+		exts = MediaAssetService.SUPPORTED_COVER_EXTENSIONS
 
 		for source_name, asset_name in self._ASSET_MAP:
 			source = cache_dir / source_name
 			if not source.is_file():
 				continue
-			target = target_dir / asset_name
-			if target.exists():
-				# 已有目标 → 不覆盖
+			key = asset_name.split(".")[0]
+			if any(
+				(d / f"{key}.{ext}").is_file()
+				for d in guard_dirs
+				for ext in exts
+			):
+				# 已有该素材（任意扩展名）→ 不覆盖
 				continue
 			try:
-				shutil.copy2(source, target)
+				if self.media is not None and asset_game is not None:
+					written = self.media.set_game_asset(str(item_id), source, key)
+					written_dir = written.parent
+				else:
+					target_dir.mkdir(parents=True, exist_ok=True)
+					target = target_dir / asset_name
+					shutil.copy2(source, target)
+					written_dir = target_dir
 			except OSError:
 				logger.exception("steam asset copy failed: %s", source)
 				continue
-			key = asset_name.split(".")[0]
-			if key == "cover":
-				result["cover"] = True
-			elif key == "backdrop":
-				result["backdrop"] = True
-			elif key == "logo":
-				result["logo"] = True
+			result[key] = True
 
-		result["target_dir"] = str(target_dir).replace("\\", "/")
+		result["target_dir"] = str(written_dir or intended_dir).replace("\\", "/")
 		return result

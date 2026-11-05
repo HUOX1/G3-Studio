@@ -1,0 +1,347 @@
+ M docs/README.md
+ M docs/architecture.md
+ M docs/design/G3_Archive_Space_02.md
+ M docs/feature-status.md
+ M docs/history.md
+ D "docs/\345\274\200\345\247\213\346\217\220\347\244\272\350\257\215.txt"
+ M g3_core/backend_app.py
+ M g3_core/repository.py
+ M g3_core/services/fontset_store.py
+ M g3_core/services/game_runtime.py
+ M g3_core/services/media_assets.py
+ D g3_core/services/scraper/__init__.py
+ D g3_core/services/scraper/tmdb_client.py
+ M g3_core/services/steam_client.py
+ M g3_core/services/steamgriddb_client.py
+ D g3_frontend/assets/icons/spatial.svg
+ M g3_frontend/project.godot
+ M g3_frontend/scripts/archive_gallery.gd
+ M g3_frontend/scripts/backend_client.gd
+ M g3_frontend/scripts/emulator_edit_dialog.gd
+ M g3_frontend/scripts/font_manager.gd
+ M g3_frontend/scripts/fontset_editor.gd
+ M g3_frontend/scripts/game_create_dialog.gd
+ M g3_frontend/scripts/game_detail_view.gd
+ M g3_frontend/scripts/game_scraper_dialog.gd
+ M g3_frontend/scripts/game_section.gd
+ M g3_frontend/scripts/main.gd
+ M g3_frontend/scripts/movie_episode_drawer.gd
+ M g3_frontend/scripts/movie_wall.gd
+ M g3_frontend/scripts/navigation_drawer.gd
+ D g3_frontend/scripts/spatial_gallery.gd
+ M g3_frontend/scripts/tmdb_search_dialog.gd
+ M g3_frontend/scripts/window_chrome.gd
+ M g3_frontend/shaders/panel_gradient.gdshader
+ D g3_frontend/shaders/spatial_cover.gdshader
+ D g3_frontend/shaders/spatial_gallery_bg.gdshader
+ D g3_frontend/shaders/spatial_gallery_floor.gdshader
+ M "g3_frontend/shaders/\346\226\260\345\273\272\346\226\207\344\273\266\345\244\271/game_background.txt"
+ M g3_frontend/tests/archive_gallery_smoke.gd
+ M g3_launcher/runtime.py
+ M g3_tests/test_archive_gallery_contract.py
+ M g3_tests/test_backend_app.py
+ M g3_tests/test_backend_launch_profiles.py
+ M g3_tests/test_database_repository.py
+ M g3_tests/test_fontset_store.py
+ M g3_tests/test_game_runtime.py
+ M g3_tests/test_security_data_repair.py
+?? .workbuddy/
+?? Apply-G3NavSpringFix_Diagnostic.bat
+?? Apply-G3NavSpringFix_Diagnostic.ps1
+?? "G3-Studio \350\241\245\344\270\201\347\224\237\346\210\220\350\247\204\350\214\203\357\274\210\351\200\202\351\205\215\347\216\260\346\234\211\346\263\250\345\205\245\345\231\250\357\274\211.txt"
+?? "G3-Studio \351\241\271\347\233\256\346\214\201\347\273\255\350\277\255\344\273\243\344\270\216\350\241\245\344\270\201\344\277\256\345\244\215\350\247\204\350\214\203.txt"
+?? Run-G3Stage2Contracts.ps1
+?? Run-G3Stage3Contracts.ps1
+?? docs/G3_Main_Decoupling.md
+?? "docs/G3_\345\220\257\345\212\250\345\260\217\347\252\227\345\217\243\346\216\222\346\237\245\346\212\245\345\221\212.md"
+?? "docs/G3_\345\220\257\345\212\250\346\236\266\346\236\204\345\256\230\346\226\271\345\237\272\347\272\277\345\233\236\345\275\222\345\256\241\350\256\241.md"
+?? g3_core/services/game_process_probe.py
+?? g3_core/services/game_theme.py
+?? g3_core/services/sgdb_hero_optimizer.py
+?? g3_frontend/assets/icons/platforms/playstation-logo-colour.svg
+?? g3_frontend/assets/icons/platforms/playstation-logo-colour.svg.import
+?? g3_frontend/scripts/archive_gallery.gd.uid
+?? g3_frontend/scripts/audio_file_loader.gd.uid
+?? g3_frontend/scripts/backend_client.gd.uid
+?? g3_frontend/scripts/backend_router.gd
+?? g3_frontend/scripts/backend_router.gd.uid
+?? g3_frontend/scripts/cover_crop_dialog.gd.uid
+?? g3_frontend/scripts/cover_tool_controller.gd
+?? g3_frontend/scripts/cover_tool_controller.gd.uid
+?? g3_frontend/scripts/cover_tool_dialog.gd.uid
+?? g3_frontend/scripts/cover_tool_presentation.gd
+?? g3_frontend/scripts/cover_tool_presentation.gd.uid
+?? g3_frontend/scripts/detail_meta_glyph.gd
+?? g3_frontend/scripts/detail_meta_glyph.gd.uid
+?? g3_frontend/scripts/dvd_launch_button.gd
+?? g3_frontend/scripts/dvd_launch_button.gd.uid
+?? g3_frontend/scripts/emulator_controller.gd
+?? g3_frontend/scripts/emulator_controller.gd.uid
+?? g3_frontend/scripts/emulator_edit_dialog.gd.uid
+?? g3_frontend/scripts/emulator_list_view_builder.gd
+?? g3_frontend/scripts/emulator_list_view_builder.gd.uid
+?? g3_frontend/scripts/font_manager.gd.uid
+?? g3_frontend/scripts/fontset_editor.gd.uid
+?? g3_frontend/scripts/fontset_overview_builder.gd
+?? g3_frontend/scripts/fontset_overview_builder.gd.uid
+?? g3_frontend/scripts/game_blank_menu.gd.uid
+?? g3_frontend/scripts/game_controller.gd
+?? g3_frontend/scripts/game_controller.gd.uid
+?? g3_frontend/scripts/game_create_dialog.gd.uid
+?? g3_frontend/scripts/game_detail_view.gd.uid
+?? g3_frontend/scripts/game_dialog_assembly_builder.gd
+?? g3_frontend/scripts/game_dialog_assembly_builder.gd.uid
+?? g3_frontend/scripts/game_launch_dialog.gd.uid
+?? g3_frontend/scripts/game_manage_menu.gd.uid
+?? g3_frontend/scripts/game_metadata_dialog.gd.uid
+?? g3_frontend/scripts/game_paste_import_dialog.gd.uid
+?? g3_frontend/scripts/game_paste_payload_builder.gd
+?? g3_frontend/scripts/game_paste_payload_builder.gd.uid
+?? g3_frontend/scripts/game_scraper_dialog.gd.uid
+?? g3_frontend/scripts/game_section.gd.uid
+?? g3_frontend/scripts/game_theme_controller.gd
+?? g3_frontend/scripts/game_theme_controller.gd.uid
+?? g3_frontend/scripts/library_scan_controller.gd
+?? g3_frontend/scripts/library_scan_controller.gd.uid
+?? g3_frontend/scripts/library_scan_dialog.gd.uid
+?? g3_frontend/scripts/library_scan_import_payload_builder.gd
+?? g3_frontend/scripts/library_scan_import_payload_builder.gd.uid
+?? g3_frontend/scripts/library_scan_presentation.gd
+?? g3_frontend/scripts/library_scan_presentation.gd.uid
+?? g3_frontend/scripts/local_startup_settings_reader.gd
+?? g3_frontend/scripts/local_startup_settings_reader.gd.uid
+?? g3_frontend/scripts/main.gd.uid
+?? g3_frontend/scripts/movie_blank_menu.gd.uid
+?? g3_frontend/scripts/movie_bottom_overlay_builder.gd
+?? g3_frontend/scripts/movie_bottom_overlay_builder.gd.uid
+?? g3_frontend/scripts/movie_controller.gd
+?? g3_frontend/scripts/movie_controller.gd.uid
+?? g3_frontend/scripts/movie_create_dialog.gd.uid
+?? g3_frontend/scripts/movie_dialog_assembly_builder.gd
+?? g3_frontend/scripts/movie_dialog_assembly_builder.gd.uid
+?? g3_frontend/scripts/movie_episode_drawer.gd.uid
+?? g3_frontend/scripts/movie_info_view_builder.gd
+?? g3_frontend/scripts/movie_info_view_builder.gd.uid
+?? g3_frontend/scripts/movie_library_settings_view_builder.gd
+?? g3_frontend/scripts/movie_library_settings_view_builder.gd.uid
+?? g3_frontend/scripts/movie_manage_menu.gd.uid
+?? g3_frontend/scripts/movie_metadata_dialog.gd.uid
+?? g3_frontend/scripts/movie_wall.gd.uid
+?? g3_frontend/scripts/navigation_drawer.gd.uid
+?? g3_frontend/scripts/playtime_edit_dialog.gd.uid
+?? g3_frontend/scripts/remove_confirmation_presenter.gd
+?? g3_frontend/scripts/remove_confirmation_presenter.gd.uid
+?? g3_frontend/scripts/render_ownership_coordinator.gd
+?? g3_frontend/scripts/render_ownership_coordinator.gd.uid
+?? g3_frontend/scripts/steam_batch_scrape_coordinator.gd
+?? g3_frontend/scripts/steam_batch_scrape_coordinator.gd.uid
+?? g3_frontend/scripts/steam_search_dialog.gd.uid
+?? g3_frontend/scripts/system_home_view_builder.gd
+?? g3_frontend/scripts/system_home_view_builder.gd.uid
+?? g3_frontend/scripts/system_settings_controller.gd
+?? g3_frontend/scripts/system_settings_controller.gd.uid
+?? g3_frontend/scripts/text_context_menu_localizer.gd.uid
+?? g3_frontend/scripts/theme_policy.gd
+?? g3_frontend/scripts/theme_policy.gd.uid
+?? g3_frontend/scripts/tmdb_poster_dialog.gd.uid
+?? g3_frontend/scripts/tmdb_search_dialog.gd.uid
+?? g3_frontend/scripts/window_chrome.gd.uid
+?? g3_frontend/scripts/window_policy.gd
+?? g3_frontend/scripts/window_policy.gd.uid
+?? g3_frontend/scripts/world_scene_builder.gd
+?? g3_frontend/scripts/world_scene_builder.gd.uid
+?? g3_frontend/shaders/archive_atmosphere.gdshader.uid
+?? g3_frontend/shaders/archive_cover.gdshader.uid
+?? g3_frontend/shaders/archive_floor.gdshader.uid
+?? g3_frontend/shaders/archive_glass.gdshader.uid
+?? g3_frontend/shaders/card_shadow.gdshader.uid
+?? g3_frontend/shaders/cinema_ambient.gdshader.uid
+?? g3_frontend/shaders/dot_glow.gdshader.uid
+?? g3_frontend/shaders/edge_glow.gdshader.uid
+?? g3_frontend/shaders/game_ambient.gdshader.uid
+?? g3_frontend/shaders/game_background.gdshader.uid
+?? g3_frontend/shaders/game_card.gdshader.uid
+?? g3_frontend/shaders/game_card_flip.gdshader
+?? g3_frontend/shaders/game_card_flip.gdshader.uid
+?? g3_frontend/shaders/game_card_gray.gdshader.uid
+?? g3_frontend/shaders/glass_panel.gdshader.uid
+?? g3_frontend/shaders/glow_line.gdshader.uid
+?? g3_frontend/shaders/icon_fill.gdshader.uid
+?? g3_frontend/shaders/movie_backdrop.gdshader.uid
+?? g3_frontend/shaders/movie_card.gdshader.uid
+?? g3_frontend/shaders/panel_gradient.gdshader.uid
+?? g3_frontend/shaders/sidebar_hover_bg.gdshader.uid
+?? "g3_frontend/shaders/\346\226\260\345\273\272\346\226\207\344\273\266\345\244\271/archive_atmosphere.txt"
+?? "g3_frontend/shaders/\346\226\260\345\273\272\346\226\207\344\273\266\345\244\271/archive_cover.txt"
+?? "g3_frontend/shaders/\346\226\260\345\273\272\346\226\207\344\273\266\345\244\271/archive_floor.txt"
+?? "g3_frontend/shaders/\346\226\260\345\273\272\346\226\207\344\273\266\345\244\271/archive_glass.txt"
+?? "g3_frontend/shaders/\346\226\260\345\273\272\346\226\207\344\273\266\345\244\271/game_card_flip.txt"
+?? g3_frontend/tests/G3_WebP_API_Diagnostic.gd
+?? g3_frontend/tests/G3_WebP_API_Diagnostic.gd.uid
+?? g3_frontend/tests/G3_WebP_Diagnostic.gd
+?? g3_frontend/tests/G3_WebP_Diagnostic.gd.uid
+?? g3_frontend/tests/G3_WebP_Extension_Check.gd
+?? g3_frontend/tests/G3_WebP_Extension_Check.gd.uid
+?? g3_frontend/tests/archive_gallery_smoke.gd.uid
+?? g3_frontend/tests/backend_connection_epoch_contract.tscn
+?? g3_frontend/tests/backend_connection_epoch_contract_scene.gd
+?? g3_frontend/tests/backend_connection_epoch_contract_scene.gd.uid
+?? g3_frontend/tests/backend_router_contract.gd
+?? g3_frontend/tests/backend_router_contract.gd.uid
+?? g3_frontend/tests/backend_router_contract.tscn
+?? g3_frontend/tests/backend_router_contract_scene.gd
+?? g3_frontend/tests/backend_router_contract_scene.gd.uid
+?? g3_frontend/tests/cover_tool_controller_contract.tscn
+?? g3_frontend/tests/cover_tool_controller_contract_scene.gd
+?? g3_frontend/tests/cover_tool_controller_contract_scene.gd.uid
+?? g3_frontend/tests/cover_tool_presentation_contract.tscn
+?? g3_frontend/tests/cover_tool_presentation_contract_scene.gd
+?? g3_frontend/tests/cover_tool_presentation_contract_scene.gd.uid
+?? g3_frontend/tests/emulator_list_view_builder_contract.tscn
+?? g3_frontend/tests/emulator_list_view_builder_contract_scene.gd
+?? g3_frontend/tests/emulator_list_view_builder_contract_scene.gd.uid
+?? g3_frontend/tests/emulator_reads_contract.tscn
+?? g3_frontend/tests/emulator_reads_contract_scene.gd
+?? g3_frontend/tests/emulator_reads_contract_scene.gd.uid
+?? g3_frontend/tests/emulator_writes_contract.tscn
+?? g3_frontend/tests/emulator_writes_contract_scene.gd
+?? g3_frontend/tests/emulator_writes_contract_scene.gd.uid
+?? g3_frontend/tests/fontset_overview_builder_contract.tscn
+?? g3_frontend/tests/fontset_overview_builder_contract_scene.gd
+?? g3_frontend/tests/fontset_overview_builder_contract_scene.gd.uid
+?? g3_frontend/tests/game_batch_remove_contract.tscn
+?? g3_frontend/tests/game_batch_remove_contract_scene.gd
+?? g3_frontend/tests/game_batch_remove_contract_scene.gd.uid
+?? g3_frontend/tests/game_controller_contract.tscn
+?? g3_frontend/tests/game_controller_contract_scene.gd
+?? g3_frontend/tests/game_controller_contract_scene.gd.uid
+?? g3_frontend/tests/game_crud_contract.tscn
+?? g3_frontend/tests/game_crud_contract_scene.gd
+?? g3_frontend/tests/game_crud_contract_scene.gd.uid
+?? g3_frontend/tests/game_dialog_assembly_builder_contract.tscn
+?? g3_frontend/tests/game_dialog_assembly_builder_contract_scene.gd
+?? g3_frontend/tests/game_dialog_assembly_builder_contract_scene.gd.uid
+?? g3_frontend/tests/game_metadata_contract.tscn
+?? g3_frontend/tests/game_metadata_contract_scene.gd
+?? g3_frontend/tests/game_metadata_contract_scene.gd.uid
+?? g3_frontend/tests/game_play_request_contract.tscn
+?? g3_frontend/tests/game_play_request_contract_scene.gd
+?? g3_frontend/tests/game_play_request_contract_scene.gd.uid
+?? g3_frontend/tests/game_sgdb_contract.tscn
+?? g3_frontend/tests/game_sgdb_contract_scene.gd
+?? g3_frontend/tests/game_sgdb_contract_scene.gd.uid
+?? g3_frontend/tests/game_steam_scrape_contract.tscn
+?? g3_frontend/tests/game_steam_scrape_contract_scene.gd
+?? g3_frontend/tests/game_steam_scrape_contract_scene.gd.uid
+?? g3_frontend/tests/library_scan_controller_contract.tscn
+?? g3_frontend/tests/library_scan_controller_contract_scene.gd
+?? g3_frontend/tests/library_scan_controller_contract_scene.gd.uid
+?? g3_frontend/tests/library_scan_import_contract.tscn
+?? g3_frontend/tests/library_scan_import_contract_scene.gd
+?? g3_frontend/tests/library_scan_import_contract_scene.gd.uid
+?? g3_frontend/tests/library_scan_import_payload_builder_contract.tscn
+?? g3_frontend/tests/library_scan_import_payload_builder_contract_scene.gd
+?? g3_frontend/tests/library_scan_import_payload_builder_contract_scene.gd.uid
+?? g3_frontend/tests/library_scan_import_presentation_contract.tscn
+?? g3_frontend/tests/library_scan_import_presentation_contract_scene.gd
+?? g3_frontend/tests/library_scan_import_presentation_contract_scene.gd.uid
+?? g3_frontend/tests/library_scan_platform_import_contract.tscn
+?? g3_frontend/tests/library_scan_platform_import_contract_scene.gd
+?? g3_frontend/tests/library_scan_platform_import_contract_scene.gd.uid
+?? g3_frontend/tests/library_scan_presentation_contract.tscn
+?? g3_frontend/tests/library_scan_presentation_contract_scene.gd
+?? g3_frontend/tests/library_scan_presentation_contract_scene.gd.uid
+?? g3_frontend/tests/movie_assets_contract.tscn
+?? g3_frontend/tests/movie_assets_contract_scene.gd
+?? g3_frontend/tests/movie_assets_contract_scene.gd.uid
+?? g3_frontend/tests/movie_bottom_overlay_builder_contract.tscn
+?? g3_frontend/tests/movie_bottom_overlay_builder_contract_scene.gd
+?? g3_frontend/tests/movie_bottom_overlay_builder_contract_scene.gd.uid
+?? g3_frontend/tests/movie_controller_contract.tscn
+?? g3_frontend/tests/movie_controller_contract_scene.gd
+?? g3_frontend/tests/movie_controller_contract_scene.gd.uid
+?? g3_frontend/tests/movie_dialog_assembly_builder_contract.tscn
+?? g3_frontend/tests/movie_dialog_assembly_builder_contract_scene.gd
+?? g3_frontend/tests/movie_dialog_assembly_builder_contract_scene.gd.uid
+?? g3_frontend/tests/movie_info_content_presentation_contract.tscn
+?? g3_frontend/tests/movie_info_content_presentation_contract_scene.gd
+?? g3_frontend/tests/movie_info_content_presentation_contract_scene.gd.uid
+?? g3_frontend/tests/movie_info_view_builder_contract.tscn
+?? g3_frontend/tests/movie_info_view_builder_contract_scene.gd
+?? g3_frontend/tests/movie_info_view_builder_contract_scene.gd.uid
+?? g3_frontend/tests/movie_library_settings_view_builder_contract.tscn
+?? g3_frontend/tests/movie_library_settings_view_builder_contract_scene.gd
+?? g3_frontend/tests/movie_library_settings_view_builder_contract_scene.gd.uid
+?? g3_frontend/tests/movie_play_contract.tscn
+?? g3_frontend/tests/movie_play_contract_scene.gd
+?? g3_frontend/tests/movie_play_contract_scene.gd.uid
+?? g3_frontend/tests/movie_play_event_order_contract.tscn
+?? g3_frontend/tests/movie_play_event_order_contract_scene.gd
+?? g3_frontend/tests/movie_play_event_order_contract_scene.gd.uid
+?? g3_frontend/tests/movie_play_overlap_contract.tscn
+?? g3_frontend/tests/movie_play_overlap_contract_scene.gd
+?? g3_frontend/tests/movie_play_overlap_contract_scene.gd.uid
+?? g3_frontend/tests/movie_play_session_order_contract.tscn
+?? g3_frontend/tests/movie_play_session_order_contract_scene.gd
+?? g3_frontend/tests/movie_play_session_order_contract_scene.gd.uid
+?? g3_frontend/tests/movie_remaining_requests_contract.tscn
+?? g3_frontend/tests/movie_remaining_requests_contract_scene.gd
+?? g3_frontend/tests/movie_remaining_requests_contract_scene.gd.uid
+?? g3_frontend/tests/movie_requests_contract.tscn
+?? g3_frontend/tests/movie_requests_contract_scene.gd
+?? g3_frontend/tests/movie_requests_contract_scene.gd.uid
+?? g3_frontend/tests/movie_scan_tmdb_contract.tscn
+?? g3_frontend/tests/movie_scan_tmdb_contract_scene.gd
+?? g3_frontend/tests/movie_scan_tmdb_contract_scene.gd.uid
+?? g3_frontend/tests/movie_tmdb_apply_posters_contract.tscn
+?? g3_frontend/tests/movie_tmdb_apply_posters_contract_scene.gd
+?? g3_frontend/tests/movie_tmdb_apply_posters_contract_scene.gd.uid
+?? g3_frontend/tests/movie_writes_contract.tscn
+?? g3_frontend/tests/movie_writes_contract_scene.gd
+?? g3_frontend/tests/movie_writes_contract_scene.gd.uid
+?? g3_frontend/tests/remove_confirmation_presenter_contract.tscn
+?? g3_frontend/tests/remove_confirmation_presenter_contract_scene.gd
+?? g3_frontend/tests/remove_confirmation_presenter_contract_scene.gd.uid
+?? g3_frontend/tests/render_ownership_contract.tscn
+?? g3_frontend/tests/render_ownership_contract_scene.gd
+?? g3_frontend/tests/render_ownership_contract_scene.gd.uid
+?? g3_frontend/tests/render_ownership_exit_order_contract.tscn
+?? g3_frontend/tests/render_ownership_exit_order_contract_scene.gd
+?? g3_frontend/tests/render_ownership_exit_order_contract_scene.gd.uid
+?? g3_frontend/tests/render_ownership_integration_contract.tscn
+?? g3_frontend/tests/render_ownership_integration_contract_scene.gd
+?? g3_frontend/tests/render_ownership_integration_contract_scene.gd.uid
+?? g3_frontend/tests/steam_batch_scrape_coordinator_contract.tscn
+?? g3_frontend/tests/steam_batch_scrape_coordinator_contract_scene.gd
+?? g3_frontend/tests/steam_batch_scrape_coordinator_contract_scene.gd.uid
+?? g3_frontend/tests/steam_batch_scrape_main_integration_contract.tscn
+?? g3_frontend/tests/steam_batch_scrape_main_integration_contract_scene.gd
+?? g3_frontend/tests/steam_batch_scrape_main_integration_contract_scene.gd.uid
+?? g3_frontend/tests/system_home_view_builder_contract.tscn
+?? g3_frontend/tests/system_home_view_builder_contract_scene.gd
+?? g3_frontend/tests/system_home_view_builder_contract_scene.gd.uid
+?? g3_frontend/tests/system_settings_controller_contract.tscn
+?? g3_frontend/tests/system_settings_controller_contract_scene.gd
+?? g3_frontend/tests/system_settings_controller_contract_scene.gd.uid
+?? g3_frontend/tests/system_settings_specialized_contract.tscn
+?? g3_frontend/tests/system_settings_specialized_contract_scene.gd
+?? g3_frontend/tests/system_settings_specialized_contract_scene.gd.uid
+?? g3_frontend/tests/system_settings_updates_contract.tscn
+?? g3_frontend/tests/system_settings_updates_contract_scene.gd
+?? g3_frontend/tests/system_settings_updates_contract_scene.gd.uid
+?? g3_frontend/tests/system_settings_writes_contract.tscn
+?? g3_frontend/tests/system_settings_writes_contract_scene.gd
+?? g3_frontend/tests/system_settings_writes_contract_scene.gd.uid
+?? g3_frontend/tests/theme_app_info_reads_contract.tscn
+?? g3_frontend/tests/theme_app_info_reads_contract_scene.gd
+?? g3_frontend/tests/theme_app_info_reads_contract_scene.gd.uid
+?? g3_launcher/startup_splash.py
+?? g3_tests/test_external_startup_splash_contract.py
+?? g3_tests/test_game_play_session_id.py
+?? g3_tests/test_game_process_probe_r4.py
+?? g3_tests/test_game_process_probe_r5.py
+?? g3_tests/test_game_theme_service.py
+?? g3_tests/test_movie_watch_lifecycle.py
+?? g3_tests/test_nav_drawer_glow_boundary.py
+?? g3_tests/test_sgdb_hero_optimization.py
+?? g3_tests/test_trial_placeholder_webp.py

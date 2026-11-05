@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from g3_core.repository import LibraryRepository
+from g3_core.services.game_process_probe import steam_install_dir, epic_install_dir, uplay_install_dir
 
 
 if os.name == "nt":
@@ -114,6 +115,8 @@ class RunningGame:
 	launch_exe: str
 	monitorable: bool = True
 	monitor_exe: str = ""
+	install_dir: str = ""
+	platform: str = ""
 
 
 class GameRuntime:
@@ -156,18 +159,21 @@ class GameRuntime:
 					["xdg-open", f"steam://rungameid/{steam_appid}"]
 				)
 				logger.info("Steam game launched via xdg-open: appid=%s", steam_appid)
+			installed_dir = steam_install_dir(steam_appid)
 			return RunningGame(
 				item_id=str(game.get("id", "")),
 				process=None,
 				started_at=datetime.now(timezone.utc),
 				launch_exe="",
-				monitorable=False,
-				monitor_exe="",
+				monitorable=bool(installed_dir) or bool(str(game.get("monitor_exe", "") or "").strip()),
+				monitor_exe=str(game.get("monitor_exe", "") or "").strip(),
+				install_dir=installed_dir,
 			)
 
 		# Epic：优先直接启动 exe（拿得到句柄、能计时）。
 		# URL 会报 "Application Not Owned"，只作为没有 exe 时的回落。
 		if source == "epic":
+			epic_dir = epic_install_dir(external_id)
 			launch_exe = str(game.get("launch_exe", "") or "").strip()
 			if launch_exe and Path(launch_exe).is_file():
 				exe_path = Path(launch_exe)
@@ -196,6 +202,8 @@ class GameRuntime:
 					launch_exe=str(exe_path),
 					monitorable=True,
 					monitor_exe=str(game.get("monitor_exe", "") or "").strip(),
+					install_dir=epic_dir or str(exe_path.parent),
+					platform="epic",
 				)
 
 			# 没有可用 exe → 回落 URL（老数据）
@@ -225,8 +233,10 @@ class GameRuntime:
 					process=None,
 					started_at=datetime.now(timezone.utc),
 					launch_exe="",
-					monitorable=False,
-					monitor_exe="",
+					monitorable=bool(epic_dir) or bool(str(game.get("monitor_exe", "") or "").strip()),
+					monitor_exe=str(game.get("monitor_exe", "") or "").strip(),
+					install_dir=epic_dir,
+					platform="epic",
 				)
 			# 都没有 → 落到下面普通逻辑（会报 launch_exe 缺失）
 
@@ -247,6 +257,13 @@ class GameRuntime:
 		if not exe_path.is_file():
 			raise FileNotFoundError(launch_exe)
 
+		# Some customized PCSX2 builds require Windows separators in CHD paths.
+		if profile_type == "emulator" and os.name == "nt" and content_path:
+			content_path = content_path.replace("/", "\\")
+
+		# A standalone package may have no ROM; never pass an unresolved placeholder.
+		if profile_type == "emulator" and not content_path and "{content}" in launch_args:
+			raise ValueError("content_path is required when launch_args contains {content}")
 		# 解析参数：{content} 占位符替换
 		args = self._parse_args(launch_args, content_path)
 		cwd = Path(working_dir) if working_dir else exe_path.parent
@@ -301,8 +318,10 @@ class GameRuntime:
 			process=process,
 			started_at=datetime.now(timezone.utc),
 			launch_exe=str(exe_path),
-			monitorable=process is not None,
+			monitorable=process is not None or os.name == "nt",
 			monitor_exe=str(game.get("monitor_exe", "") or "").strip(),
+			install_dir=(uplay_install_dir(external_id) if source in ("uplay", "ubisoft") else "")
+				or str(cwd if profile_type == "launcher" else exe_path.parent),
 		)
 
 	def _launch_elevated(

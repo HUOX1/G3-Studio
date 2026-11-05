@@ -8,6 +8,18 @@ signal game_context_requested(game: Dictionary, position: Vector2)
 signal blank_context_requested(position: Vector2)
 signal game_removed(item_id: String)
 signal batch_scrape_requested(item_ids: Array)
+signal game_theme_requested(item_id: String)
+signal game_theme_cleared
+# 详情页真正的进入 / 退出事件。旁路消费者（如 UI 音效）订阅这两个信号即可，
+# 不要复用含义不明确的 game_theme_cleared——它在"进入一个没有主题 ID 的游戏"时也会发射。
+signal detail_entered
+signal detail_exited
+signal save_insights_requested(item_id: String)
+signal game_card_clicked
+# WB-04.1-B：侧边栏顶部（与窗口菜单栏相接）当前实际合成色。
+# 菜单栏订阅它即可与侧边栏顶部保持完全一致的底色与过渡，而不是各算一套公式。
+signal sidebar_surface_color_changed(color: Color)
+signal lab_cover_samples_changed
 
 # ============================================================
 # 布局
@@ -31,13 +43,20 @@ const SIDEBAR_FOOTER_H_BASE: float = 52.0
 const GRID_PADDING_BASE: float = 24.0
 
 # 导航抽屉的几何（跟 navigation_drawer.gd 里的常量同步）：
-#   5 个按钮 × 44 + 4 个间距 × 10 + 左右 padding 16×2 = 292
-#   顶 34 + gap 10 + 高 64 = 底边 108
-# 抽屉展开时，被它水平覆盖的卡片，顶部被压住的量就往下推。
+# 宽度：5 个按钮 × 44 + 4 个间距 × 10 + 左右 padding 16×2 = 292
+# 光晕线：TOP_OFFSET 34 + GLOW_Y_OFFSET 3 = 37；抽屉底边：34 + 10 + 64 = 108。
+# 影响边界比抽屉本体略宽：上下保留更充足的安全区，左侧增加有限的卡片感应范围。
 const NAV_DRAWER_W: float = 292.0
-const NAV_DRAWER_BOTTOM: float = 108.
-# 抽屉底边到第一行卡片顶边的额外留白（避免贴太紧）
-const NAV_DRAWER_GAP: float = 14.0
+const NAV_DRAWER_GLOW_Y: float = 37.0
+const NAV_DRAWER_TOP_CLEARANCE: float = 18.0
+const NAV_DRAWER_BOTTOM: float = 108.0
+const NAV_DRAWER_GAP: float = 24.0
+const NAV_DRAWER_LEFT_INFLUENCE: float = 48.0
+const NAV_DRAWER_LEFT_OVERLAP_ALLOWANCE: float = 48.0
+# 抽屉完全展开后，左侧卡片再横向让位；距离按卡片与抽屉的实际间隔计算。
+const NAV_CARD_PUSH_MIN_DISTANCE: float = 30.0
+const NAV_CARD_PUSH_CLEARANCE: float = 12.0
+const NAV_CARD_PUSH_MAX_DISTANCE: float = 80.0
 const CARD_ASPECT: float = 2.0 / 3.0
 const SHADOW_H_BASE: float = 16.0
 
@@ -52,17 +71,23 @@ const CARD_TIERS: Array = [
 ]
 const GRID_GAP_MIN: float = 12.0
 
-# 卡片阴影 idle / hover 参数（唯一来源：_make_grid_cell 的初值与
-# _refresh_grid_styles 的目标值都读这里，保证"移开"精确回到启动值）
-const SHADOW_IDLE_SIZE: float = 5.0     # 默认阴影大小（越大越散）
-const SHADOW_IDLE_OX: float = 1.0       # 默认横向偏移（正=向右）
-const SHADOW_IDLE_OY: float = 1.0       # 默认纵向偏移（正=向下）
-const SHADOW_IDLE_ALPHA: float = 0.30   # 默认不透明度
-
-const SHADOW_HOVER_SIZE: float = 7.0   # 悬停阴影大小
-const SHADOW_HOVER_OX: float = 1.0      # 悬停横向偏移
-const SHADOW_HOVER_OY: float = 2.0      # 悬停纵向偏移
-const SHADOW_HOVER_ALPHA: float = 0.50  # 悬停不透明度
+# Hover Lab V2 · H: stationary focus. CSS box-shadow/filter 230ms ease.
+# CSS idle: 0 5px 13px rgba(0,0,0,.30); hover: 0 8px 20px rgba(0,0,0,.45),
+# 0 0 0 1px #9ccbd447; filter: brightness(1.055).
+const HOVER_H_DURATION: float = 0.230
+const HOVER_H_IDLE_SHADOW_SIZE: float = 13.0
+const HOVER_H_ACTIVE_SHADOW_SIZE: float = 20.0
+const HOVER_H_IDLE_SHADOW_OFFSET: float = 5.0
+const HOVER_H_ACTIVE_SHADOW_OFFSET: float = 8.0
+const HOVER_H_IDLE_SHADOW_ALPHA: float = 0.30
+const HOVER_H_ACTIVE_SHADOW_ALPHA: float = 0.45
+# Softer semi-transparent edge aligned to the poster rectangle.
+const HOVER_H_ACTIVE_BORDER: Color = Color8(156, 203, 212, 92)
+const HOVER_H_BORDER_WIDTH: int = 1
+# Lab V2 G: transform 250ms cubic-bezier(.25,.8,.25,1), scale(1.028).
+const HOVER_G_DURATION: float = 0.250
+const HOVER_G_SCALE: float = 1.028
+const HOVER_H_BRIGHTNESS: float = 1.055
 
 # 海报墙弹簧（伪弹性：卡片位置改变时弹到新位置，不做碰撞检测）
 const CARD_SPRING_STIFFNESS: float = 300.0
@@ -71,6 +96,9 @@ const CARD_SPRING_SETTLE: float = 0.5      # 小于此速度视为停止（像�
 const CARD_SPRING_MAX_SPEED: float = 1800.0  # 速度上限（像素/秒）
 # “添加游戏”按钮的圆圈加号图标尺寸
 const ADD_ICON_SZ_BASE: float = 28.0
+# WB-04.1-F：添加按钮 hover 改为整体均匀缩放（替代原光晕）
+const ADD_HOVER_SCALE: float = 1.04
+const ADD_HOVER_DURATION: float = 0.15
 const CARD_SPRING_JITTER_POS: float = 30.0  # 初始位置随机偏移范围
 const CARD_SPRING_JITTER_VEL: float = 80.0  # 初始随机速度范围
 # 退出详情页后的冷却时长
@@ -78,11 +106,28 @@ const EXIT_COOLDOWN_MAX: float = 2.0
 const EXIT_COOLDOWN_MIN: float = 0.2
 const GAME_BACKGROUND_SHADER: Shader = preload("res://shaders/game_background.gdshader")
 const SIDEBAR_HOVER_BG_SHADER: Shader = preload("res://shaders/sidebar_hover_bg.gdshader")
-const CARD_GRAY_SHADER: Shader = preload("res://shaders/game_card_gray.gdshader")
+const CARD_COVER_SHADER: Shader = preload("res://shaders/g3_crt_signal_cover.gdshader")
+const CARD_CRT_HALO_SHADER: Shader = preload("res://shaders/g3_crt_signal_halo.gdshader")
+# v13: Stretch the accepted 520ms HTML motion to 960ms without changing
+# the shader's phase boundaries or its no-placeholder rendering.
+const CRT_CARD_DURATION_MS: float = 960.0
+const CRT_CARD_HTML_DURATION_MS: float = 520.0
+const CRT_CARD_GAP_USEC: int = 130000
 # 不可启动卡片的灰度系数（0.0 = 全灰，1.0 = 原色）
 const CARD_UNPLAYABLE_SATURATION: float = 0.15
 const BG_COLOR: Color = Color(0.10, 0.115, 0.135, 1.0)          # 中间层
-const SIDEBAR_BG: Color = Color(0.075, 0.085, 0.105, 1.0)        # 最暗
+# WB-04：侧边栏三段底色。明度关系固定为 顶部 < 底部 < 中部 < 海报墙，
+# 三段之间只靠连续色块的自然色差形成边界，不再绘制硬分割线。
+const SIDEBAR_BG: Color = Color8(17, 25, 35)          # #111923 顶部功能区（导航/工具）
+const SIDEBAR_LIST_BG: Color = Color8(26, 38, 53)     # #1A2635 中部游戏列表
+# WB-04.1-C：底部功能区改为与顶部同底色，使顶部/底部成为一致的深色框架。
+const SIDEBAR_FOOTER_BG: Color = Color8(17, 25, 35)   # #111923（原 #141E2B）
+# 顶部工具图标的目标显示尺寸（按字号曲线缩放，1920 宽约 20px）。
+const SIDEBAR_ICON_BASE: float = 20.0
+# WB-04.1-D / WB-04.2-A：游戏文字列表视口的内阴影（视觉层，忽略鼠标）
+const SIDEBAR_INNER_SHADOW_SHADER: Shader = preload("res://shaders/sidebar_inner_shadow.gdshader")
+const SIDEBAR_SHADOW_RADIUS_BASE: float = 22.0
+const SIDEBAR_SHADOW_STRENGTH: float = 0.26
 const SIDEBAR_ITEM_HOVER: Color = Color(0.15, 0.18, 0.22, 1.0)
 const SIDEBAR_ITEM_SEL: Color = Color(0.28, 0.36, 0.48, 0.7)
 const SIDEBAR_TEXT: Color = Color(0.82, 0.86, 0.90, 1.0)
@@ -93,9 +138,12 @@ var _font_manager: Node = null
 var _all_games: Array[Dictionary] = []
 var games: Array[Dictionary] = []
 var selected_index: int = 0
+var _sidebar_detail_highlight: bool = false
 var _batch_scrape_btn: Button
 var _search_text: String = ""
+const SORT_CONFIG_PATH: String = "user://game_sort.cfg"
 var _sort_mode: String = "name"
+var _sort_only_rebuild: bool = false
 
 var _ui_layer: CanvasLayer
 var _root: Control
@@ -103,10 +151,28 @@ var _bg: ColorRect
 
 # 侧边栏
 var _sidebar_root: Control
+# Long game names are rendered in a root-level overlay so they can cross the
+# ScrollContainer viewport and poster-wall sibling without being clipped.
+var _sidebar_tip_layer: Control = null
+var _sidebar_active_tip: PanelContainer = null
+var _sidebar_active_tip_label: Label = null
+var _sidebar_bg: ColorRect = null
+var _sidebar_list_bg: ColorRect = null
+var _sidebar_theme_overlay: ColorRect = null
+var _sidebar_theme_material: ShaderMaterial = null
+var _sidebar_gradient_tween: Tween = null
+var _sidebar_top_divider: ColorRect = null
+var _sidebar_divider_theme_tween: Tween = null
+var _sidebar_footer_bg: ColorRect = null
+var _sidebar_footer_theme_overlay: ColorRect = null
+var _sidebar_footer_theme_tween: Tween = null
 var _sidebar_header: Control
 var _search_icon_btn: Button
 var _sort_icon_btn: Button
 var _cartridge_icon: TextureRect = null
+# 以"实际显示像素"为基准栅格化 SVG，避免大图缩小造成的线宽不均（0 = 尚未生成）
+var _tool_icon_px: int = 0
+var _add_icon_px: int = 0
 var _game_count_label: Label = null
 var _search_field: LineEdit
 var _sidebar_scroll: ScrollContainer
@@ -115,6 +181,11 @@ var _sidebar_list: VBoxContainer
 var _sidebar_items: Array[Button] = []
 var _sidebar_footer: Control
 var _add_btn: Button
+# WB-04.1-D：侧边栏内阴影（最上层、忽略鼠标）
+var _sidebar_shadow: ColorRect = null
+var _sidebar_shadow_mat: ShaderMaterial = null
+# WB-04.1-F：添加游戏按钮的 hover 缩放 tween
+var _add_scale_tween: Tween = null
 
 # 海报墙
 var _grid_root: Control
@@ -128,8 +199,6 @@ var _batch_bar: HBoxContainer
 var _batch_select_all_btn: Button
 var _batch_delete_btn: Button
 var _hover_index: int = -1
-# 空状态：无游戏时让"添加"按钮光晕呼吸
-var _add_glow_breathe: bool = false
 var _add_btn_hovered: bool = false
 # 退出详情页后的冷却：等鼠标松开 + 缓冲，避免误触第一张卡片
 var _exit_cooldown: bool = false
@@ -138,9 +207,81 @@ var _exit_cooldown_t: float = 0.0
 var _ui_scale: float = 1.0
 var _font_scale: float = 1.0
 var _detail_view = null
+# Detail F motion lab: independent of the 0.68s Hero theme color tween.
+const DETAIL_F_DURATION: float = 0.50
+const DETAIL_F_START_SCALE: float = 0.97
+var _detail_f_tween: Tween = null
+var _sidebar_pending_detail_index: int = -1
+var _sidebar_pending_detail_id: String = ""
+var _sidebar_pending_media_key: String = ""
+var _detail_f_exiting: bool = false
+var _detail_f_exit_start_alpha: float = 1.0
 var _animated_cache: Dictionary = {}
+var _animated_probe_cache: Dictionary = {}
 # 静态纹理缓存：避免重建卡片时图片消失导致闪烁
 static var _cover_texture_cache: Dictionary = {}
+# Bound image work so the first cards are not competing with every later card at once.
+const MAX_CONCURRENT_COVER_LOADS: int = 2
+# Keep GPU texture creation from bunching several completed worker tasks into one frame.
+const MAX_COVER_TEXTURE_APPLIES_PER_FRAME: int = 1
+# Game covers are displayed small; cap decoded images before GPU upload to reduce upload stalls.
+const MAX_COVER_TEXTURE_EDGE: int = 768
+var _cover_load_queue: Array[Dictionary] = []
+var _cover_apply_queue: Array[Dictionary] = []
+var _active_cover_loads: int = 0
+var _cover_queue_batching: bool = false
+# One wall-owned queue; no per-card entrance Tween and no old flip effect.
+var _crt_next_start_usec: int = 0
+var _crt_active_cards: Array[Dictionary] = []
+var _crt_boot_generation: int = -1
+# Cold-boot reveal is a one-shot visual session, NOT the first grid build.
+# The controller may defer it while covers are loaded behind the startup veil.
+var _initial_wall_reveal_pending: bool = true
+var _initial_wall_reveal_held: bool = false
+var _initial_wall_order_wait_usec: int = 0
+const INITIAL_WALL_ORDER_WAIT_USEC: int = 260000
+var _card_springs_enabled: bool = false
+# Temporary performance diagnostics for the current grid rebuild.
+var _perf_grid_generation: int = 0
+var _perf_grid_started_msec: int = 0
+var _perf_grid_cache_hits: int = 0
+var _perf_grid_async_queued: int = 0
+var _perf_grid_async_pending: int = 0
+var _perf_grid_first_cover_logged: bool = false
+var _perf_cover_queue_wait_total_ms: float = 0.0
+var _perf_cover_queue_wait_max_ms: float = 0.0
+var _perf_cover_file_read_total_ms: float = 0.0
+var _perf_cover_file_read_max_ms: float = 0.0
+var _perf_cover_decode_total_ms: float = 0.0
+var _perf_cover_decode_max_ms: float = 0.0
+var _perf_cover_apply_total_ms: float = 0.0
+var _perf_cover_apply_max_ms: float = 0.0
+var _perf_cover_apply_queue_wait_total_ms: float = 0.0
+var _perf_cover_apply_queue_wait_max_ms: float = 0.0
+var _perf_cover_image_decode_total_ms: float = 0.0
+var _perf_cover_image_decode_max_ms: float = 0.0
+var _perf_cover_resize_total_ms: float = 0.0
+var _perf_cover_resize_max_ms: float = 0.0
+var _perf_cover_mipmap_total_ms: float = 0.0
+var _perf_cover_mipmap_max_ms: float = 0.0
+var _perf_cover_texture_create_total_ms: float = 0.0
+var _perf_cover_texture_create_max_ms: float = 0.0
+var _perf_cover_texture_assign_total_ms: float = 0.0
+var _perf_cover_texture_assign_max_ms: float = 0.0
+var _perf_cover_animated_check_total_ms: float = 0.0
+var _perf_cover_animated_check_max_ms: float = 0.0
+var _perf_cover_reveal_request_total_ms: float = 0.0
+var _perf_cover_reveal_request_max_ms: float = 0.0
+var _perf_cover_plugin_load_elapsed_total_ms: float = 0.0
+var _perf_cover_plugin_load_elapsed_max_ms: float = 0.0
+var _perf_cover_source_pixels_total: int = 0
+var _perf_cover_output_pixels_total: int = 0
+var _perf_cover_resized_count: int = 0
+var _perf_cover_decoded_image_samples: int = 0
+var _perf_cover_apply_queue_peak: int = 0
+var _perf_cover_stage_detail_logs: int = 0
+var _perf_cover_samples: int = 0
+var _perf_cover_peak_active: int = 0
 # 下一次 _rebuild_grid 是否要弹入（只由排序 / 搜索变化设置）
 var _rebuild_should_pop: bool = false
 
@@ -149,6 +290,8 @@ var _rebuild_should_pop: bool = false
 var _ui_ready: bool = false
 # 导航抽屉是否打开。打开时被它覆盖的卡片下推让位，收回时弹回。
 var _nav_opened: bool = false
+# 抽屉完全展开后才启用左侧卡片横向让位，确保与上下让位分阶段发生。
+var _nav_drawer_revealed: bool = false
 
 # 本次 _relayout 是否要动画（由调用方决定，用完自动重置）
 var _animate_layout: bool = false
@@ -157,6 +300,8 @@ var _animate_layout: bool = false
 var _scroll_velocity: float = 0.0
 var _scroll_friction: float = 7.0     # 摩擦力（越小滑得越远）
 var _scroll_wheel_power: float = 500.0 # 滚轮推力（越大滚得越快）
+# 导航抽屉打开时，跟踪滚动偏移；只在偏移变化时刷新卡片目标，不重建布局。
+var _last_nav_push_scroll: int = -1
 # 侧边栏滚动参数
 var _sidebar_velocity: float = 0.0
 var _sidebar_friction: float = 9.0
@@ -165,6 +310,7 @@ var _sidebar_wheel_power: float = 300.0
 # ---------------------------------------------------------------------------
 
 func configure(cam: Camera3D) -> void:
+	_load_sort_mode()
 	camera = cam
 	set_process_unhandled_input(true)
 	_compute_scale()
@@ -185,9 +331,19 @@ func set_nav_opened(opened: bool) -> void:
 	if _nav_opened == opened:
 		return
 	_nav_opened = opened
-	# 走弹簧路径：卡片平滑地被"挤"到新位置，收回时弹回去
+	_nav_drawer_revealed = false
+	# 第一阶段只更新上下让位目标。抽屉尚未展开时，左侧卡片不横移。
 	_animate_layout = true
 	_relayout()
+	_last_nav_push_scroll = _grid_scroll.scroll_vertical if opened and _grid_scroll != null else -1
+
+
+func set_nav_drawer_revealed() -> void:
+	# 由导航抽屉在展开动画结束后调用，左侧卡片从此刻起才横向让位。
+	if not _nav_opened or _nav_drawer_revealed:
+		return
+	_nav_drawer_revealed = true
+	_refresh_nav_push_targets()
 
 func set_font_manager(fm: Node) -> void:
 	_font_manager = fm
@@ -215,15 +371,17 @@ func _apply_sidebar_fonts() -> void:
 		var tip_lbl: Label = item.get_meta("tip_lbl", null)
 		if tip_lbl != null:
 			_apply_font_to_label(tip_lbl, "game_sidebar")
+	_refresh_sidebar_styles()
 
 func _apply_font_to_label(label: Label, key: String) -> void:
 	if label == null or _font_manager == null:
 		return
-	var f: FontFile = _font_manager.get_font_for(key, "games")
+	var f: Font = _font_manager.get_font_for(key, "games")
 	if f != null:
 		label.add_theme_font_override("font", f)
 	else:
 		label.remove_theme_font_override("font")
+	_font_manager.apply_style_to_control(label, key, "games")
 
 func _font_size(key: String, fallback: int) -> int:
 	if _font_manager == null:
@@ -254,9 +412,28 @@ func _compute_top_offset() -> int:
 		return 0
 	return 34
 
+# These methods are called by main.gd. Holding never blocks cover decoding;
+# it blocks only the first visible CRT animation frame.
+func hold_initial_wall_reveal() -> void:
+	if not _initial_wall_reveal_pending:
+		return
+	_initial_wall_reveal_held = true
+	if OS.get_environment("G3_BOOT_DIAG") == "1":
+		print("[G3_BOOT] WALL_REVEAL_HELD")
+
+func release_initial_wall_reveal() -> void:
+	_initial_wall_reveal_held = false
+	if OS.get_environment("G3_BOOT_DIAG") == "1":
+		print("[G3_BOOT] WALL_REVEAL_RELEASED " + str(Time.get_ticks_msec()))
+	if visible:
+		_crt_schedule_visible_covers()
+
 func _process(delta: float) -> void:
 	if not visible:
 		return
+	_drain_cover_apply_queue()
+	_crt_schedule_visible_covers()
+	_crt_advance_active(delta)
 	# 海报墙滚动惯性（极速丝滑版）
 	if abs(_scroll_velocity) > 5.0:
 		var vbar := _grid_scroll.get_v_scroll_bar()
@@ -292,6 +469,21 @@ func _process(delta: float) -> void:
 				_sidebar_velocity = 0.0
 	else:
 		_sidebar_velocity = 0.0
+
+	# The tooltip is outside the sidebar ScrollContainer; follow its source row
+	# while the list scrolls so the inline expansion remains anchored in place.
+	_sync_sidebar_tip_position()
+
+	# 抽屉打开期间，滚动会改变当前受遮挡的行。只更新目标位置，
+	# 不重跑完整 _relayout，也不重置弹簧速度，保证位移连续。
+	if _nav_opened and _grid_scroll != null and is_instance_valid(_grid_scroll):
+		var nav_scroll: int = _grid_scroll.scroll_vertical
+		if nav_scroll != _last_nav_push_scroll:
+			_last_nav_push_scroll = nav_scroll
+			_refresh_nav_push_targets()
+	else:
+		_last_nav_push_scroll = -1
+
 	# 1. 批量模式下，选中的卡片发光呼吸（放在最前面，确保不受任何 return 影响）
 	if _batch_mode:
 		var breath = 0.4 + sin(Time.get_ticks_msec() / 500.0) * 0.4 # 0.0 ~ 0.8 之间呼吸
@@ -330,8 +522,6 @@ func _process(delta: float) -> void:
 				var cur_sat = float(mat.get_shader_parameter("saturation"))
 				var new_sat = lerpf(cur_sat, target_sat, color_follow)
 				mat.set_shader_parameter("saturation", new_sat)
-	# 阴影平滑过渡（同样每帧都要跑）
-	_update_shadow_lerp(delta)
 
 	# 刚退出详情页：等鼠标松开 + 缓冲，才允许响应卡片
 	if _exit_cooldown:
@@ -361,16 +551,12 @@ func _process(delta: float) -> void:
 		return
 	if _grid_scroll != null and not _grid_scroll.visible:
 		return
+	# During F crossfade, the gallery is visible only as a compositing source;
+	# do not run its hover/card animation logic underneath the detail view.
+	if _detail_f_tween != null and _detail_f_tween.is_running():
+		return
 
-	# 空状态光晕呼吸
-	if _add_glow_breathe and not _add_btn_hovered:
-		var t: float = Time.get_ticks_msec() / 1000.0
-		var breath: float = 0.20 + sin(t * 2.1) * 0.15
-		var glow_bg: ColorRect = _add_btn.get_meta("glow_bg", null)
-		if glow_bg != null:
-			var mat: ShaderMaterial = glow_bg.material as ShaderMaterial
-			if mat != null:
-				mat.set_shader_parameter("brightness", breath)
+	# WB-04.1-F：空状态光晕呼吸随光晕层一并移除。
 
 	# 鼠标 hover 检测
 	var mouse: Vector2 = get_viewport().get_mouse_position()
@@ -397,6 +583,8 @@ func _process(delta: float) -> void:
 
 
 func _update_card_springs(delta: float) -> void:
+	if not _card_springs_enabled:
+		return
 	# 伪弹性：每张卡片一个目标位置 + 当前位置，用弹簧追目标（不做碰撞检测）
 	for i in range(_cell_buttons.size()):
 		var btn: Button = _cell_buttons[i]
@@ -419,7 +607,8 @@ func _update_card_springs(delta: float) -> void:
 			vel = vel.normalized() * CARD_SPRING_MAX_SPEED
 		wrapper.position += vel * delta
 
-		# 速度极小时视为停止，避免无限抖动
+
+		# 位置速度极小时视为停止，避免无限抖动。
 		if vel.length() < CARD_SPRING_SETTLE and delta_pos.length() < 0.5:
 			wrapper.position = target
 			vel = Vector2.ZERO
@@ -451,6 +640,16 @@ func _build_ui() -> void:
 	_build_grid()
 	_build_detail()
 
+	# Must be the final root-level sibling: sidebar rows live inside a
+	# ScrollContainer (which clips children), while the full-name hover overlay
+	# must render above the poster wall in the same horizontal row.
+	_sidebar_tip_layer = Control.new()
+	_sidebar_tip_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_sidebar_tip_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sidebar_tip_layer.clip_contents = false
+	_sidebar_tip_layer.z_index = 4096
+	_root.add_child(_sidebar_tip_layer)
+
 func _build_sidebar() -> void:
 	_sidebar_root = Control.new()
 	_sidebar_root.anchor_top = 0.0
@@ -458,11 +657,62 @@ func _build_sidebar() -> void:
 	_sidebar_root.mouse_filter = Control.MOUSE_FILTER_STOP
 	_root.add_child(_sidebar_root)
 
-	var sidebar_bg := ColorRect.new()
-	sidebar_bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	sidebar_bg.color = SIDEBAR_BG
-	sidebar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_sidebar_root.add_child(sidebar_bg)
+	# WB-04：三段底板按 Z 序叠放，全部位于主题渐变覆盖层之下，由后者统一做色相联动。
+	_sidebar_bg = ColorRect.new()
+	_sidebar_bg.anchor_right = 1.0
+	_sidebar_bg.color = SIDEBAR_BG
+	_sidebar_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sidebar_root.add_child(_sidebar_bg)
+
+	_sidebar_list_bg = ColorRect.new()
+	_sidebar_list_bg.anchor_right = 1.0
+	_sidebar_list_bg.anchor_bottom = 1.0
+	_sidebar_list_bg.color = SIDEBAR_LIST_BG
+	_sidebar_list_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sidebar_root.add_child(_sidebar_list_bg)
+
+	_sidebar_footer_bg = ColorRect.new()
+	_sidebar_footer_bg.anchor_right = 1.0
+	_sidebar_footer_bg.anchor_top = 1.0
+	_sidebar_footer_bg.anchor_bottom = 1.0
+	_sidebar_footer_bg.color = SIDEBAR_FOOTER_BG
+	_sidebar_footer_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sidebar_root.add_child(_sidebar_footer_bg)
+
+	# Hero-driven ambient tint overlay. It sits above the base color but below all controls.
+	_sidebar_theme_overlay = ColorRect.new()
+	_sidebar_theme_overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_sidebar_theme_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sidebar_theme_overlay.color = Color.WHITE
+	var sidebar_gradient_shader := Shader.new()
+	sidebar_gradient_shader.code = """shader_type canvas_item;
+uniform vec4 top_color : source_color = vec4(0.0, 0.0, 0.0, 0.0);
+uniform vec4 bottom_color : source_color = vec4(0.0, 0.0, 0.0, 0.0);
+// The theme gradient spans the game-list band only, not header or footer.
+uniform float list_start = 0.12;
+uniform float list_end = 0.93;
+void fragment() {
+    float band_t = clamp((UV.y - list_start) / max(list_end - list_start, 0.001), 0.0, 1.0);
+    COLOR = mix(top_color, bottom_color, band_t);
+}
+"""
+	_sidebar_theme_material = ShaderMaterial.new()
+	_sidebar_theme_material.shader = sidebar_gradient_shader
+	_sidebar_theme_material.set_shader_parameter("top_color", Color(0.0, 0.0, 0.0, 0.0))
+	_sidebar_theme_material.set_shader_parameter("bottom_color", Color(0.0, 0.0, 0.0, 0.0))
+	_sidebar_theme_overlay.material = _sidebar_theme_material
+	_sidebar_root.add_child(_sidebar_theme_overlay)
+
+	# 页脚不沿用列表渐变的底端弱染色；它与窗口菜单栏 / 顶部功能区共享同一实际合成色。
+	# 该覆盖层位于全侧栏渐变之上、页脚按钮控件之下，列表区域完全不受影响。
+	_sidebar_footer_theme_overlay = ColorRect.new()
+	_sidebar_footer_theme_overlay.anchor_left = 0.0
+	_sidebar_footer_theme_overlay.anchor_right = 1.0
+	_sidebar_footer_theme_overlay.anchor_top = 1.0
+	_sidebar_footer_theme_overlay.anchor_bottom = 1.0
+	_sidebar_footer_theme_overlay.color = SIDEBAR_BG
+	_sidebar_footer_theme_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sidebar_root.add_child(_sidebar_footer_theme_overlay)
 
 	# 顶部：图标行
 	_sidebar_header = Control.new()
@@ -481,24 +731,28 @@ func _build_sidebar() -> void:
 	_search_icon_btn.toggle_mode = true
 	_search_icon_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	_search_icon_btn.custom_minimum_size = Vector2(40.0, 40.0)
-	_search_icon_btn.icon = _load_svg_icon("magnifier", 80.0 / 24.0)
-	_search_icon_btn.expand_icon = true
+	_search_icon_btn.icon = _load_svg_icon("magnifier", _tool_icon_size(_font_scale))
+	_setup_tool_icon_button(_search_icon_btn)
+	_search_icon_btn.expand_icon = false
 	_search_icon_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_search_icon_btn.toggled.connect(_on_search_icon_toggled)
 	icon_row.add_child(_search_icon_btn)
+	_apply_tool_icon_color(_search_icon_btn)
 
 	_sort_icon_btn = Button.new()
 	_sort_icon_btn.text = ""                              # 不要文字
-	_sort_icon_btn.expand_icon = true
+	_sort_icon_btn.expand_icon = false
 	_sort_icon_btn.focus_mode = Control.FOCUS_NONE
 	_sort_icon_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
 	_sort_icon_btn.custom_minimum_size = Vector2(40.0, 40.0)  # 方形按钮
-	# 注意：Godot 4.7.2 的 Button 没有 icon_max_width 属性，
-	# 限制图标尺寸只能靠加载时的 SVG 缩放（见 _update_sort_icon 传 scale_factor）
+	# WB-04：expand_icon 关闭 → 图标按纹理原始像素绘制（约 20px），
+	# 纹理由 _load_svg_icon 按目标尺寸栅格化，不再依赖大图二次缩小。
 	_sort_icon_btn.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN  # 不撑满
 	_sort_icon_btn.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_setup_tool_icon_button(_sort_icon_btn)
 	_sort_icon_btn.pressed.connect(_on_sort_icon_pressed)
 	icon_row.add_child(_sort_icon_btn)
+	_apply_tool_icon_color(_sort_icon_btn)
 
 	# 撑开空白
 	var spacer := Control.new()
@@ -507,12 +761,15 @@ func _build_sidebar() -> void:
 	icon_row.add_child(spacer)
 
 	# FC 卡带图标
+	# 游戏数量图标与顶部工具图标同尺寸（约 20px），保证同一行的光学一致性
 	_cartridge_icon = TextureRect.new()
-	_cartridge_icon.texture = _load_svg_icon("cartridge", 80.0 / 24.0)
-	_cartridge_icon.custom_minimum_size = Vector2(22.0, 22.0)
+	_cartridge_icon.texture = _load_svg_icon("game_count", _tool_icon_size(_font_scale))
+	_cartridge_icon.custom_minimum_size = Vector2(SIDEBAR_LOGO_SZ_BASE, SIDEBAR_LOGO_SZ_BASE)
 	_cartridge_icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
 	_cartridge_icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	_cartridge_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# 图标颜色跟随侧边栏前景色，而不是官方 SVG 的黑色默认线条。
+	_cartridge_icon.modulate = SIDEBAR_TEXT
 	icon_row.add_child(_cartridge_icon)
 
 	# 数量
@@ -563,6 +820,8 @@ func _build_sidebar() -> void:
 	_sep_line = ColorRect.new()
 	_sep_line.anchor_right = 1.0
 	_sep_line.color = Color(0.16, 0.20, 0.26, 1.0)
+	# WB-04：三段区由自然色差分区，保留节点但不再绘制硬分割线。
+	_sep_line.visible = false
 	_sidebar_root.add_child(_sep_line)
 
 	# 底部：+ 按钮
@@ -573,52 +832,31 @@ func _build_sidebar() -> void:
 	_sidebar_footer.mouse_filter = Control.MOUSE_FILTER_PASS
 	_sidebar_root.add_child(_sidebar_footer)
 
-	var footer_bg := ColorRect.new()
-	footer_bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	footer_bg.color = Color(0.105, 0.130, 0.165, 1.0)  # 和侧边栏同色
-	footer_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_sidebar_footer.add_child(footer_bg)
-
 	_add_btn = Button.new()
 	_add_btn.text = ""          # 改成圆圈加号图标
 	_add_btn.focus_mode = Control.FOCUS_NONE
 	_add_btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	# 悬停反馈完全交给光晕层 → 四个状态 stylebox 一律透明
+	# 四个状态 stylebox 一律透明：hover 反馈改为按钮整体缩放（WB-04.1-F）
 	var empty_st := StyleBoxEmpty.new()
 	_add_btn.add_theme_stylebox_override("normal", empty_st)
 	_add_btn.add_theme_stylebox_override("hover", empty_st)
 	_add_btn.add_theme_stylebox_override("pressed", empty_st)
 	_add_btn.add_theme_stylebox_override("focus", empty_st)
 	_add_btn.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	# 缩放围绕按钮中心，不改变布局占位（anchor 布局尺寸不受 scale 影响）
+	_add_btn.pivot_offset = Vector2.ZERO
 	_add_btn.pressed.connect(func(): add_game_requested.emit())
 	_add_btn.mouse_entered.connect(func():
 		_add_btn_hovered = true
-		_animate_add_glow(0.55)
+		_animate_add_button_scale(ADD_HOVER_SCALE, ADD_HOVER_DURATION)
 	)
 	_add_btn.mouse_exited.connect(func():
 		_add_btn_hovered = false
-		_animate_add_glow(0.0)
+		_animate_add_button_scale(1.0, ADD_HOVER_DURATION)
 	)
 	_sidebar_footer.add_child(_add_btn)
 
-	# 光点光晕背景层（放在按钮内容之下）
-	var glow_bg := ColorRect.new()
-	glow_bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	glow_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	glow_bg.color = Color.WHITE
-	var glow_mat := ShaderMaterial.new()
-	glow_mat.shader = preload("res://shaders/dot_glow.gdshader")
-	glow_mat.set_shader_parameter("glow_color", Color(0.50, 0.72, 0.95))
-	glow_mat.set_shader_parameter("brightness", 0.0)   # 初始不可见
-	glow_mat.set_shader_parameter("falloff", 2.0)
-	# 光点半径走"自动模式"：0 = 用 min(node_size) × glow_radius_scale
-	glow_mat.set_shader_parameter("glow_radius_px", 0.0)
-	glow_mat.set_shader_parameter("glow_radius_scale", 2.0)
-	# node_size 由 _relayout 每帧同步（像素距离法需要知道节点物理尺寸）
-	glow_bg.material = glow_mat
-	_add_btn.add_child(glow_bg)
-	_add_btn.move_child(glow_bg, 0)
-	_add_btn.set_meta("glow_bg", glow_bg)
+	# WB-04.1-F：悬停光晕层已移除（含空状态呼吸），改为整体均匀缩放。
 
 	# 圆圈加号图标（固定尺寸，居中）
 	var icon_rect := TextureRect.new()
@@ -626,16 +864,47 @@ func _build_sidebar() -> void:
 	icon_rect.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	icon_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	icon_rect.size = Vector2(ADD_ICON_SZ_BASE, ADD_ICON_SZ_BASE)
-	var icon_tex: Texture2D = _load_svg_icon("add_circle", 80.0 / 24.0)
+	var icon_tex: Texture2D = _load_svg_icon("add_circle", ADD_ICON_SZ_BASE)
 	if icon_tex != null:
 		icon_rect.texture = icon_tex
 	_add_btn.add_child(icon_rect)
 	_add_btn.set_meta("icon_rect", icon_rect)
 
-func _load_svg_icon(icon_id: String, scale_factor: float = 3.0) -> Texture2D:
-	# 与 navigation_drawer._load_icon 同法：读 SVG 文本 → load_svg_from_string
-	# scale_factor：SVG 是 24×24 viewBox，乘出来就是纹理像素尺寸。
-	# 小按钮（排序图标，24×24 按钮 40×40）传 1.0，别放大到 72×72 撑破布局。
+	# WB-04.2-A：内阴影只覆盖"游戏文字列表的可见视口"，不再作用于整个侧边栏。
+	# 挂在 _sidebar_root 最后 → 位于滚动内容之上；矩形由 _relayout_sidebar 对齐
+	# _sidebar_scroll 的视口（不随滚动内容移动），mouse_filter = IGNORE。
+	_sidebar_shadow = ColorRect.new()
+	_sidebar_shadow.anchor_right = 1.0
+	_sidebar_shadow.anchor_bottom = 1.0
+	_sidebar_shadow.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sidebar_shadow.color = Color.WHITE
+	_sidebar_shadow_mat = ShaderMaterial.new()
+	_sidebar_shadow_mat.shader = SIDEBAR_INNER_SHADOW_SHADER
+	_sidebar_shadow_mat.set_shader_parameter("shadow_color", Color(0.0, 0.0, 0.0, 1.0))
+	_sidebar_shadow_mat.set_shader_parameter("strength", SIDEBAR_SHADOW_STRENGTH)
+	_sidebar_shadow_mat.set_shader_parameter("falloff", 2.0)
+	# 只要上、右、下三边；左边完全关闭，避免与侧边栏外缘形成暗边
+	_sidebar_shadow_mat.set_shader_parameter("left_weight", 0.0)
+	_sidebar_shadow_mat.set_shader_parameter("top_weight", 1.0)
+	_sidebar_shadow_mat.set_shader_parameter("right_weight", 1.0)
+	_sidebar_shadow_mat.set_shader_parameter("bottom_weight", 1.0)
+	_sidebar_shadow_mat.set_shader_parameter("radius_px", SIDEBAR_SHADOW_RADIUS_BASE)
+	_sidebar_shadow.material = _sidebar_shadow_mat
+	_sidebar_root.add_child(_sidebar_shadow)
+
+	_emit_sidebar_surface_color()
+
+# Transparent icon-only controls; hover/pressed feedback remains in the icon itself.
+func _setup_tool_icon_button(button: Button) -> void:
+	var empty := StyleBoxEmpty.new()
+	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
+		button.add_theme_stylebox_override(state, empty)
+	button.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+
+func _load_svg_icon(icon_id: String, display_px: float) -> Texture2D:
+	# 与 navigation_drawer._load_icon 同法：读 SVG 文本 → load_svg_from_string。
+	# WB-04：按"实际显示像素"栅格化（不再用 80~96px 纹理再缩小），
+	# 避免二次缩放造成的锯齿、线宽不均与光学偏移。
 	var path: String = "res://assets/icons/%s.svg" % icon_id
 	if not FileAccess.file_exists(path):
 		return null
@@ -644,37 +913,36 @@ func _load_svg_icon(icon_id: String, scale_factor: float = 3.0) -> Texture2D:
 		return null
 	var svg_text: String = file.get_as_text()
 	file.close()
+	# SVG 统一为 24×24 viewBox，scale = 目标像素 / 24
+	var scale_factor: float = maxf(display_px, 8.0) / 24.0
 	var image := Image.new()
 	if image.load_svg_from_string(svg_text, scale_factor) != OK:
 		return null
+	image.generate_mipmaps()
 	return ImageTexture.create_from_image(image)
 
-func _animate_add_glow(target: float) -> void:
-	var glow_bg: ColorRect = _add_btn.get_meta("glow_bg", null)
-	if glow_bg == null:
+func _tool_icon_size(font_scale: float) -> int:
+	# 顶部工具图标约 20px（1920 宽），跟随字号曲线轻微缩放。
+	return maxi(12, int(round(SIDEBAR_ICON_BASE * font_scale)))
+
+func _apply_tool_icon_color(button: Button) -> void:
+	# 图标描边为白色，这里统一用主题前景色调制，避免直接显示纯白或官方黑色。
+	# 各状态同色：沿用这两个按钮原本"无悬停变色"的响应方式。
+	for state in ["icon_normal_color", "icon_hover_color", "icon_pressed_color", "icon_focus_color"]:
+		button.add_theme_color_override(state, SIDEBAR_TEXT)
+	button.add_theme_color_override("icon_disabled_color", Color(SIDEBAR_TEXT, 0.4))
+
+func _animate_add_button_scale(target: float, duration: float) -> void:
+	# hover 只改 scale，不动布局占位；重复移入/移出时先杀掉上一个 tween，避免叠加或残留。
+	if _add_btn == null or not is_instance_valid(_add_btn):
 		return
-	var mat: ShaderMaterial = glow_bg.material as ShaderMaterial
-	if mat == null:
+	if _add_scale_tween != null and _add_scale_tween.is_valid():
+		_add_scale_tween.kill()
+	if is_equal_approx(_add_btn.scale.x, target):
 		return
-	if _add_btn.has_meta("glow_tween"):
-		var old: Tween = _add_btn.get_meta("glow_tween")
-		if old != null and old.is_valid():
-			old.kill()
-	# tween_method 的 from 必须传当前值，否则会跳变
-	var cur: float = 0.0
-	var v: Variant = mat.get_shader_parameter("brightness")
-	if v is float:
-		cur = v
-	var tw := create_tween()
-	tw.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	tw.tween_method(
-		func(val: float) -> void:
-			mat.set_shader_parameter("brightness", val),
-		cur,
-		target,
-		0.5
-	)
-	_add_btn.set_meta("glow_tween", tw)
+	_add_scale_tween = create_tween()
+	_add_scale_tween.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	_add_scale_tween.tween_property(_add_btn, "scale", Vector2.ONE * target, duration)
 
 func _build_grid() -> void:
 	_grid_root = Control.new()
@@ -698,6 +966,7 @@ func _build_grid() -> void:
 		vbar.add_theme_stylebox_override("grabber", empty_style)
 		vbar.add_theme_stylebox_override("grabber_highlight", empty_style)
 		vbar.add_theme_stylebox_override("grabber_pressed", empty_style)
+		vbar.value_changed.connect(_on_cover_scroll_value_changed)
 
 	# 滚轮惯性：手动接管滚轮事件
 	_grid_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
@@ -746,11 +1015,244 @@ func _build_detail() -> void:
 	_detail_view = detail_script.new()
 	_detail_view.back_requested.connect(_on_detail_back)
 	_detail_view.play_requested.connect(_on_detail_play)
+	_detail_view.game_hero_ready.connect(_on_detail_game_hero_ready)
+	_detail_view.save_insights_requested.connect(func(item_id: String): save_insights_requested.emit(item_id))
 	# 加在右侧海报墙区域里（这样它紧贴 _grid_root 的 rect，不会盖住侧边栏）
 	_grid_root.add_child(_detail_view)
 
 # ---------------------------------------------------------------------------
 # 布局刷新
+
+# 以导航抽屉的微弱光晕线作为插入锚点，决定卡片向上或向下让位。
+# 返回值是有正负号的位移：负数向上，正数向下。
+# 影响边界固定为 [光晕线 - 上安全间距, 抽屉底边 + 下安全间距]，
+# 只处理水平重叠明显的列；下方级联位移会被行间距逐步吸收。
+func _compute_nav_push_by_col_row(
+	cols: int,
+	top: float,
+	padding: float,
+	sidebar_w: float,
+	cell_w: float,
+	cell_h: float,
+	gap: float,
+	shadow_h: float
+) -> Dictionary:
+	var push_by_col_row: Dictionary = {}
+	if not _nav_opened or cols <= 0 or _cell_buttons.is_empty():
+		return push_by_col_row
+
+	var vp: Vector2 = get_viewport().get_visible_rect().size
+	var nav_cx: float = vp.x * 0.5
+	var nav_left: float = nav_cx - NAV_DRAWER_W * 0.5
+	var nav_right: float = nav_cx + NAV_DRAWER_W * 0.5
+	var glow_y: float = NAV_DRAWER_GLOW_Y
+	var upper_safe_y: float = glow_y - NAV_DRAWER_TOP_CLEARANCE
+	var lower_safe_y: float = NAV_DRAWER_BOTTOM + NAV_DRAWER_GAP
+	var scroll_y: float = float(_grid_scroll.scroll_vertical) if _grid_scroll != null else 0.0
+
+	var covered_cols: Array[int] = []
+	for col_i in range(cols):
+		var col_left_s: float = sidebar_w + padding + float(col_i) * (cell_w + gap)
+		var col_right_s: float = col_left_s + cell_w
+		var h_ov: float = maxf(0.0, minf(col_right_s, nav_right) - maxf(col_left_s, nav_left))
+		if h_ov / maxf(cell_w, 1.0) >= 0.35:
+			covered_cols.append(col_i)
+
+	var n_rows: int = (_cell_buttons.size() + cols - 1) / cols
+	var row_step: float = cell_h + gap + shadow_h
+	for col_i in covered_cols:
+		var row_tops: Array[float] = []
+		var row_bottoms: Array[float] = []
+		var row_offsets: Array[float] = []
+		for row_i in range(n_rows):
+			# 内容坐标减去滚动偏移，得到卡片当前的基础屏幕位置；不读取已动画的位置，避免位移累加。
+			var row_top_s: float = top + padding + float(row_i) * row_step - scroll_y
+			row_tops.append(row_top_s)
+			row_bottoms.append(row_top_s + cell_h + shadow_h)
+			row_offsets.append(0.0)
+
+		# 优先找到光晕线穿过的卡片行。光晕在卡片下三分之一时向上；
+		# 在上三分之一时向下；中间区域比较两种位移，选择移动距离更小的一侧。
+		var glow_row: int = -1
+		for row_i in range(n_rows):
+			if row_tops[row_i] <= glow_y and row_bottoms[row_i] >= glow_y:
+				glow_row = row_i
+				break
+
+		if glow_row >= 0:
+			var shift_up: float = maxf(0.0, row_bottoms[glow_row] - upper_safe_y)
+			var shift_down: float = maxf(0.0, lower_safe_y - row_tops[glow_row])
+			var glow_ratio: float = (glow_y - row_tops[glow_row]) / maxf(cell_h, 1.0)
+			var prefer_up: bool = false
+			if glow_ratio >= (2.0 / 3.0):
+				prefer_up = true
+			elif glow_ratio <= (1.0 / 3.0):
+				prefer_up = false
+			else:
+				prefer_up = shift_up <= shift_down
+
+			if prefer_up:
+				# 上方是一整个连续行栈，必须同量上移以维持行间距；通常这些行已在视口之外。
+				for row_i in range(glow_row + 1):
+					row_offsets[row_i] = -shift_up
+				# 光晕行以下只有进入抽屉下边界的行才下移，位移通过行间距逐步衰减。
+				var up_branch_prev: float = 0.0
+				for row_i in range(glow_row + 1, n_rows):
+					var up_branch_direct: float = maxf(0.0, lower_safe_y - row_tops[row_i])
+					var up_branch_propagated: float = maxf(0.0, up_branch_prev - gap)
+					var up_branch_shift: float = maxf(up_branch_direct, up_branch_propagated)
+					row_offsets[row_i] = up_branch_shift
+					up_branch_prev = up_branch_shift
+			else:
+				# 光晕位于卡片上部时，将该行及下方行向下让位，不动光晕上方的卡片。
+				var down_branch_prev: float = 0.0
+				for row_i in range(glow_row, n_rows):
+					var down_branch_direct: float = maxf(0.0, lower_safe_y - row_tops[row_i])
+					var down_branch_propagated: float = maxf(0.0, down_branch_prev - gap)
+					var down_branch_shift: float = maxf(down_branch_direct, down_branch_propagated)
+					row_offsets[row_i] = down_branch_shift
+					down_branch_prev = down_branch_shift
+		else:
+			# 光晕线恰好落在两行之间：上方最近的一行清出上边界，下方最近的一行清出下边界。
+			var upper_row: int = -1
+			for row_i in range(n_rows):
+				if row_tops[row_i] < glow_y and row_bottoms[row_i] > upper_safe_y:
+					upper_row = row_i
+			if upper_row >= 0:
+				var gap_shift_up: float = maxf(0.0, row_bottoms[upper_row] - upper_safe_y)
+				for row_i in range(upper_row + 1):
+					row_offsets[row_i] = -gap_shift_up
+
+			var lower_row: int = -1
+			for row_i in range(n_rows):
+				if row_tops[row_i] >= glow_y and row_tops[row_i] < lower_safe_y and row_bottoms[row_i] > glow_y:
+					lower_row = row_i
+					break
+			if lower_row >= 0:
+				var gap_branch_prev: float = 0.0
+				for row_i in range(lower_row, n_rows):
+					var gap_branch_direct: float = maxf(0.0, lower_safe_y - row_tops[row_i])
+					var gap_branch_propagated: float = maxf(0.0, gap_branch_prev - gap)
+					var gap_branch_shift: float = maxf(gap_branch_direct, gap_branch_propagated)
+					row_offsets[row_i] = maxf(row_offsets[row_i], gap_branch_shift)
+					gap_branch_prev = gap_branch_shift
+
+		for row_i in range(n_rows):
+			if absf(row_offsets[row_i]) > 0.01:
+				push_by_col_row["%d:%d" % [col_i, row_i]] = row_offsets[row_i]
+	return push_by_col_row
+
+
+# 抽屉完全展开后，只推动左侧最近的一列卡片横向让位。
+# 横向位移仍由 _update_card_springs 的位置弹簧驱动，不再旋转卡片。
+func _compute_nav_left_push_by_col_row(
+	cols: int,
+	top: float,
+	padding: float,
+	sidebar_w: float,
+	cell_w: float,
+	cell_h: float,
+	gap: float,
+	shadow_h: float
+) -> Dictionary:
+	var left_push_by_col_row: Dictionary = {}
+	if not _nav_opened or not _nav_drawer_revealed or cols <= 0 or _cell_buttons.is_empty():
+		return left_push_by_col_row
+
+	var vp: Vector2 = get_viewport().get_visible_rect().size
+	var nav_left: float = vp.x * 0.5 - NAV_DRAWER_W * 0.5
+	var left_col: int = -1
+	var nearest_gap: float = INF
+	for col_i in range(cols):
+		var col_left_s: float = sidebar_w + padding + float(col_i) * (cell_w + gap)
+		var col_right_s: float = col_left_s + cell_w
+		var gap_to_drawer: float = nav_left - col_right_s
+		# 只选择抽屉左侧感应范围内最近的一列；不把全屏下更远的列卷入。
+		if gap_to_drawer < -NAV_DRAWER_LEFT_OVERLAP_ALLOWANCE:
+			continue
+		if gap_to_drawer > NAV_DRAWER_LEFT_INFLUENCE:
+			continue
+		if absf(gap_to_drawer) < absf(nearest_gap):
+			nearest_gap = gap_to_drawer
+			left_col = col_i
+
+	if left_col < 0:
+		return left_push_by_col_row
+
+	var upper_safe_y: float = NAV_DRAWER_GLOW_Y - NAV_DRAWER_TOP_CLEARANCE
+	var lower_safe_y: float = NAV_DRAWER_BOTTOM + NAV_DRAWER_GAP
+	var scroll_y: float = float(_grid_scroll.scroll_vertical) if _grid_scroll != null else 0.0
+	var n_rows: int = (_cell_buttons.size() + cols - 1) / cols
+	var row_step: float = cell_h + gap + shadow_h
+	var requested_push: float = clampf(
+		NAV_CARD_PUSH_CLEARANCE - nearest_gap,
+		NAV_CARD_PUSH_MIN_DISTANCE,
+		NAV_CARD_PUSH_MAX_DISTANCE
+	)
+	# 卡片不能被横向推过 ScrollContainer 的左裁切边界。
+	var local_x: float = float(left_col) * (cell_w + gap)
+	var available_push: float = maxf(0.0, local_x + padding)
+	var push_distance: float = minf(requested_push, available_push)
+	if push_distance <= 0.01:
+		return left_push_by_col_row
+
+	for row_i in range(n_rows):
+		var card_top_s: float = top + padding + float(row_i) * row_step - scroll_y
+		var card_bottom_s: float = card_top_s + cell_h
+		# 只推动实际进入抽屉纵向影响边界的卡片行。
+		if card_bottom_s <= upper_safe_y or card_top_s >= lower_safe_y:
+			continue
+		left_push_by_col_row["%d:%d" % [left_col, row_i]] = push_distance
+
+	return left_push_by_col_row
+
+
+# 抽屉打开且滚动位置改变时，仅刷新弹簧目标；不改变当前位置、速度或卡片尺寸。
+func _refresh_nav_push_targets() -> void:
+	if not _nav_opened or _grid == null or _grid_scroll == null or _cell_buttons.is_empty():
+		return
+	var cols: int = int(_grid.get_meta("cols", 0))
+	if cols <= 0:
+		return
+	var top: float = float(_grid.get_meta("nav_layout_top", _grid_root.offset_top))
+	var padding: float = float(_grid.get_meta("nav_padding", 0.0))
+	var sidebar_w: float = float(_grid.get_meta("nav_sidebar_w", SIDEBAR_W_BASE * _ui_scale))
+	var cell_w: float = float(_grid.get_meta("cell_w", 0.0))
+	var cell_h: float = float(_grid.get_meta("cell_h", 0.0))
+	var gap: float = float(_grid.get_meta("col_gap", 0.0))
+	var shadow_h: float = float(_grid.get_meta("nav_shadow_h", SHADOW_H_BASE * _ui_scale))
+	var pushes: Dictionary = _compute_nav_push_by_col_row(
+		cols, top, padding, sidebar_w, cell_w, cell_h, gap, shadow_h
+	)
+	var left_pushes: Dictionary = _compute_nav_left_push_by_col_row(
+		cols, top, padding, sidebar_w, cell_w, cell_h, gap, shadow_h
+	)
+	var row_step: float = cell_h + gap + shadow_h
+	var rows: int = (_cell_buttons.size() + cols - 1) / cols
+	var base_content_height: float = float(rows) * row_step
+	var max_target_bottom: float = base_content_height
+	for i in range(_cell_buttons.size()):
+		var btn: Button = _cell_buttons[i]
+		if not is_instance_valid(btn):
+			continue
+		var wrapper: Control = btn.get_meta("wrapper", null)
+		if wrapper == null or not is_instance_valid(wrapper):
+			continue
+		var row: int = i / cols
+		var col: int = i % cols
+		var target_x: float = float(col) * (cell_w + gap)
+		var target_y: float = float(row) * row_step
+		var key: String = "%d:%d" % [col, row]
+		if pushes.has(key):
+			target_y += float(pushes[key])
+		if left_pushes.has(key):
+			target_x -= float(left_pushes[key])
+		max_target_bottom = maxf(max_target_bottom, target_y + cell_h + shadow_h)
+		wrapper.set_meta("target_pos", Vector2(target_x, target_y))
+	# 抽屉打开期间只扩展、不缩短滚动内容，避免滚动到最底部时卡片被裁切或反复改变滚动上限。
+	var previous_content_height: float = float(_grid.custom_minimum_size.y)
+	_grid.custom_minimum_size.y = maxf(previous_content_height, max_target_bottom)
+
 
 func _relayout() -> void:
 	if _sidebar_root == null or _grid_root == null:
@@ -761,6 +1263,84 @@ func _relayout() -> void:
 	var sidebar_w: float = SIDEBAR_W_BASE * s
 	var top: int = _compute_top_offset()
 
+	_relayout_sidebar(s, fs, sidebar_w, top)
+
+	# 海报墙（顶边固定贴窗口栏底边，不整块下移；被抽屉压住的卡片单独下推）
+	_grid_root.offset_left = sidebar_w
+	_grid_root.offset_right = 0.0
+	_grid_root.offset_top = top
+	_grid_root.offset_bottom = 0.0
+
+	var grid_pad: MarginContainer = _grid.get_meta("pad")
+	var padding: int = int(GRID_PADDING_BASE * s)
+	grid_pad.add_theme_constant_override("margin_left", padding)
+	grid_pad.add_theme_constant_override("margin_top", padding)
+	grid_pad.add_theme_constant_override("margin_right", padding)
+	grid_pad.add_theme_constant_override("margin_bottom", padding)
+
+	# 可用宽度（卡片网格区域）
+	var avail_w: float = vp.x - sidebar_w - 2.0 * padding
+	if avail_w < 100.0:
+		return   # 窗口异常小，不做布局
+
+	# avail_w 转成"逻辑像素"（基准 1920 尺度）
+	# 因为 CARD_TIERS 里的 card_w 都是基准尺度下的值；
+	# 不换算就会出现"物理 px 比逻辑 card_w"的尺度错配 → 列数偏少、卡片排不满。
+	var avail_w_logic: float = avail_w / maxf(s, 0.0001)
+
+	# 从 CARD_TIERS 选择卡片档位，保持列数、卡宽和间距的原有判定规则。
+	var tier_choice: Dictionary = _choose_grid_card_tier(avail_w_logic)
+	var chosen_card_w: float = float(tier_choice["card_w"])
+	var chosen_cols: int = int(tier_choice["cols"])
+	var chosen_gap: float = float(tier_choice["gap"])
+
+	# 档位宽高是逻辑像素 → 乘 _ui_scale，窗口缩小时卡片/间距一起缩
+	var cell_w: float = chosen_card_w * s
+	var cell_h: float = cell_w / CARD_ASPECT
+	var gap: float = chosen_gap * s
+	var cols: int = chosen_cols
+
+	# 无条件覆盖布局参数，供 _process 里做 hover 检测
+	_grid.set_meta("cols", chosen_cols)
+	_grid.set_meta("cell_w", cell_w)
+	_grid.set_meta("cell_h", cell_h)
+	_grid.set_meta("col_gap", gap)
+	_grid.set_meta("row_gap", gap)
+
+	var shadow_h: float = SHADOW_H_BASE * s
+	# 保存当前布局几何，供抽屉打开期间的滚动刷新复用，避免每帧完整重排。
+	_grid.set_meta("nav_layout_top", float(top))
+	_grid.set_meta("nav_padding", float(padding))
+	_grid.set_meta("nav_sidebar_w", sidebar_w)
+	_grid.set_meta("nav_shadow_h", shadow_h)
+	# 本次是否要动画（由调用方设置），用完立即重置
+	var should_animate: bool = _animate_layout
+	_animate_layout = false
+	# ── 抽屉挤压 ──
+	# 按当前滚动偏移计算每一行的屏幕位置，只下推实际进入抽屉遮挡范围的卡片。
+	var push_by_col_row: Dictionary = _compute_nav_push_by_col_row(
+		cols, float(top), float(padding), sidebar_w, cell_w, cell_h, gap, shadow_h
+	)
+	var left_push_by_col_row: Dictionary = _compute_nav_left_push_by_col_row(
+		cols, float(top), float(padding), sidebar_w, cell_w, cell_h, gap, shadow_h
+	)
+
+	# 3. 应用
+	var max_target_bottom: float = _layout_grid_card_targets(
+		cols, cell_w, cell_h, gap, shadow_h, should_animate, push_by_col_row, left_push_by_col_row
+	)
+
+	# 内容总高（让 ScrollContainer 能滚）；向下让位超出原内容边界时，确保末尾卡片仍可滚动到。
+	if _grid != null:
+		var rows: int = (_cell_buttons.size() + cols - 1) / cols
+		var base_content_height: float = float(rows) * (cell_h + gap + shadow_h)
+		_grid.set_meta("nav_base_content_height", base_content_height)
+		_grid.custom_minimum_size.y = maxf(base_content_height, max_target_bottom)
+
+	_relayout_sidebar_items(s, fs)
+
+
+func _relayout_sidebar(s: float, fs: float, sidebar_w: float, top: int) -> void:
 	_sidebar_root.offset_left = 0.0
 	_sidebar_root.offset_right = sidebar_w
 	_sidebar_root.offset_top = top
@@ -786,18 +1366,14 @@ func _relayout() -> void:
 	# 搜索/排序按钮都是图标（无文字）→ 方形、不加字号 override
 	_sort_icon_btn.custom_minimum_size = Vector2(top_btn_h, top_btn_h)
 	if _cartridge_icon != null:
-		_cartridge_icon.custom_minimum_size = Vector2(22.0 * s, 22.0 * s)
+		var count_icon_sz: float = float(_tool_icon_size(fs))
+		_cartridge_icon.custom_minimum_size = Vector2(count_icon_sz, count_icon_sz)
 	if _game_count_label != null:
 		var cnt_size: int = _font_size("game_sidebar", 13)
 		_game_count_label.add_theme_font_size_override("font_size", int(float(cnt_size) * fs))
-	# 光晕用"像素距离法" → 必须把节点物理尺寸同步给 shader，
-	# 否则宽扁按钮上的光点会被 UV 拉伸成椭圆
-	if _add_btn != null and _add_btn.has_meta("glow_bg"):
-		var glow_bg: ColorRect = _add_btn.get_meta("glow_bg", null)
-		if glow_bg != null:
-			var glow_mat: ShaderMaterial = glow_bg.material as ShaderMaterial
-			if glow_mat != null:
-				glow_mat.set_shader_parameter("node_size", _add_btn.size)
+	# WB-04.1-F：光晕层已移除，这里改为同步按钮中心枢轴（缩放围绕中心，窗口缩放后仍然居中）。
+	if _add_btn != null:
+		_add_btn.pivot_offset = _add_btn.size * 0.5
 
 	_search_field.position = Vector2(pad, pad + header_h + 4.0 * s)
 	_search_field.size = Vector2(sidebar_w - 2.0 * pad, search_h)
@@ -821,10 +1397,48 @@ func _relayout() -> void:
 		_sep_line.offset_top = block_bottom + 4.0 * s
 		_sep_line.offset_bottom = _sep_line.offset_top + 1.0
 
+	# WB-04：三段底板随窗口尺寸更新（锚点驱动，任何窗口尺寸都成立）。
+	# 顶部分界线与滚动列表起点对齐，避免顶部色块盖住列表首行或留下缝隙。
+	if _sidebar_bg != null:
+		_sidebar_bg.offset_top = 0.0
+		_sidebar_bg.offset_bottom = _sidebar_scroll.offset_top
+	if _sidebar_list_bg != null:
+		_sidebar_list_bg.offset_top = _sidebar_scroll.offset_top
+		_sidebar_list_bg.offset_bottom = -footer_h
+	if _sidebar_footer_bg != null:
+		_sidebar_footer_bg.offset_top = -footer_h
+		_sidebar_footer_bg.offset_bottom = 0.0
+	if _sidebar_footer_theme_overlay != null:
+		_sidebar_footer_theme_overlay.offset_top = -footer_h
+		_sidebar_footer_theme_overlay.offset_bottom = 0.0
+	# Compute the gradient UV domain from the real list bounds; header remains flat.
+	# Footer is painted by its independent opaque overlay above the theme shader.
+	if _sidebar_theme_material != null and is_instance_valid(_sidebar_theme_material):
+		var sidebar_h: float = maxf(get_viewport().get_visible_rect().size.y - float(top), 1.0)
+		var list_start_y: float = clampf(_sidebar_scroll.offset_top / sidebar_h, 0.0, 1.0)
+		var list_end_y: float = clampf(1.0 - footer_h / sidebar_h, list_start_y + 0.001, 1.0)
+		_sidebar_theme_material.set_shader_parameter("list_start", list_start_y)
+		_sidebar_theme_material.set_shader_parameter("list_end", list_end_y)
+
 	_sidebar_footer.offset_left = 0.0
 	_sidebar_footer.offset_right = 0.0
 	_sidebar_footer.offset_top = -footer_h
 	_sidebar_footer.offset_bottom = 0.0
+
+	_sync_sidebar_icon_sizes(fs, s)
+
+	# WB-04.2-A：内阴影对齐"游戏文字列表带"（顶 = 列表首行之上，底 = 页脚顶）。
+	# 覆盖层固定不动，滚动内容从它下面经过；顶部/底部功能区完全不在它的范围内。
+	if _sidebar_shadow != null:
+		_sidebar_shadow.offset_left = 0.0
+		_sidebar_shadow.offset_right = 0.0
+		_sidebar_shadow.offset_top = _sidebar_scroll.offset_top
+		_sidebar_shadow.offset_bottom = -footer_h
+	if _sidebar_shadow_mat != null:
+		var sidebar_h: float = maxf(get_viewport().get_visible_rect().size.y - float(top), 1.0)
+		var list_h: float = maxf(sidebar_h - footer_h - _sidebar_scroll.offset_top, 1.0)
+		_sidebar_shadow_mat.set_shader_parameter("size_px", Vector2(maxf(sidebar_w, 1.0), list_h))
+		_sidebar_shadow_mat.set_shader_parameter("radius_px", SIDEBAR_SHADOW_RADIUS_BASE * s)
 
 	_add_btn.add_theme_font_size_override("font_size", int(14.0 * fs))
 	# 圆圈加号图标居中
@@ -837,29 +1451,41 @@ func _relayout() -> void:
 			(_add_btn.size.y - icon_sz) * 0.5
 		)
 
-	# 海报墙（顶边固定贴窗口栏底边，不整块下移；被抽屉压住的卡片单独下推）
-	_grid_root.offset_left = sidebar_w
-	_grid_root.offset_right = 0.0
-	_grid_root.offset_top = top
-	_grid_root.offset_bottom = 0.0
 
-	var grid_pad: MarginContainer = _grid.get_meta("pad")
-	var padding: int = int(GRID_PADDING_BASE * s)
-	grid_pad.add_theme_constant_override("margin_left", padding)
-	grid_pad.add_theme_constant_override("margin_top", padding)
-	grid_pad.add_theme_constant_override("margin_right", padding)
-	grid_pad.add_theme_constant_override("margin_bottom", padding)
+func _sync_sidebar_icon_sizes(fs: float, s: float) -> void:
+	# 仅在整数像素尺寸变化时重新栅格化，窗口拖动不会反复解码 SVG。
+	var tool_px: int = _tool_icon_size(fs)
+	if tool_px != _tool_icon_px:
+		_tool_icon_px = tool_px
+		if _search_icon_btn != null:
+			_search_icon_btn.icon = _load_svg_icon("magnifier", tool_px)
+		if _cartridge_icon != null:
+			_cartridge_icon.texture = _load_svg_icon("game_count", tool_px)
+		_update_sort_icon()
+	var add_px: int = maxi(8, int(round(ADD_ICON_SZ_BASE * s)))
+	var add_icon: TextureRect = _add_btn.get_meta("icon_rect", null) as TextureRect
+	if add_icon != null and add_px != _add_icon_px:
+		_add_icon_px = add_px
+		add_icon.texture = _load_svg_icon("add_circle", add_px)
 
-	# 可用宽度（卡片网格区域）
-	var avail_w: float = vp.x - sidebar_w - 2.0 * padding
-	if avail_w < 100.0:
-		return   # 窗口异常小，不做布局
+func _relayout_sidebar_items(s: float, fs: float) -> void:
+	var sidebar_base: int = _font_size("game_sidebar", 14)
+	for item in _sidebar_items:
+		if is_instance_valid(item):
+			# 行高要放得下放大的字 → 用 fs
+			item.custom_minimum_size.y = SIDEBAR_ITEM_H_BASE * fs
+			var logo: TextureRect = item.get_meta("logo", null)
+			if logo != null:
+				logo.custom_minimum_size = Vector2(SIDEBAR_LOGO_SZ_BASE * s, SIDEBAR_LOGO_SZ_BASE * s)
+			var name_lbl: Label = item.get_meta("name_lbl", null)
+			if name_lbl != null:
+				name_lbl.add_theme_font_size_override("font_size", int(float(sidebar_base) * fs))
+			# tooltip 也跟字号曲线走
+			var tip_lbl: Label = item.get_meta("tip_lbl", null)
+			if tip_lbl != null:
+				tip_lbl.add_theme_font_size_override("font_size", int(float(sidebar_base) * fs))
 
-	# avail_w 转成"逻辑像素"（基准 1920 尺度）
-	# 因为 CARD_TIERS 里的 card_w 都是基准尺度下的值；
-	# 不换算就会出现"物理 px 比逻辑 card_w"的尺度错配 → 列数偏少、卡片排不满。
-	var avail_w_logic: float = avail_w / maxf(s, 0.0001)
-
+func _choose_grid_card_tier(avail_w_logic: float) -> Dictionary:
 	# 从 3 档里挑一个
 	var chosen_card_w: float = float(CARD_TIERS[0]["card_w"])
 	var chosen_cols: int = int(CARD_TIERS[0]["min_cols"])
@@ -911,68 +1537,20 @@ func _relayout() -> void:
 
 		# 否则继续循环（用下一档）
 
-	# 档位宽高是逻辑像素 → 乘 _ui_scale，窗口缩小时卡片/间距一起缩
-	var cell_w: float = chosen_card_w * s
-	var cell_h: float = cell_w / CARD_ASPECT
-	var gap: float = chosen_gap * s
-	var cols: int = chosen_cols
+	return {"card_w": chosen_card_w, "cols": chosen_cols, "gap": chosen_gap}
 
-	# 无条件覆盖布局参数，供 _process 里做 hover 检测
-	_grid.set_meta("cols", chosen_cols)
-	_grid.set_meta("cell_w", cell_w)
-	_grid.set_meta("cell_h", cell_h)
-	_grid.set_meta("col_gap", gap)
-	_grid.set_meta("row_gap", gap)
 
-	var shadow_h: float = SHADOW_H_BASE * s
-	# 本次是否要动画（由调用方设置），用完立即重置
-	var should_animate: bool = _animate_layout
-	_animate_layout = false
-	# ── 抽屉挤压 ──
-	# 被抽屉明显覆盖的列 → 整列下推同一距离（避免"一高一低"）；
-	# 只被"碰一角"的列 → 不动（避免误伤）。
-	var nav_open: bool = _nav_opened
-	var nav_cx: float = vp.x * 0.5
-	var nav_left: float = nav_cx - NAV_DRAWER_W * 0.5
-	var nav_right: float = nav_cx + NAV_DRAWER_W * 0.5
-	var nav_bottom: float = NAV_DRAWER_BOTTOM
-
-	# 1. 找出被明显覆盖的列（水平重叠 ≥ 卡片宽的 35%）
-	var covered_cols: Array = []
-	if nav_open:
-		for col_i in range(cols):
-			var col_left_s: float = (
-				sidebar_w + float(padding) + float(col_i) * (cell_w + gap)
-			)
-			var col_right_s: float = col_left_s + cell_w
-			var h_ov: float = minf(col_right_s, nav_right) - maxf(col_left_s, nav_left)
-			h_ov = maxf(0.0, h_ov)
-			if h_ov / maxf(cell_w, 1.0) >= 0.35:
-				covered_cols.append(col_i)
-
-	# 2. 每个被覆盖列，逐行算"几何约束下推量"
-	#    第一行被抽屉压 → 顶边落到"抽屉底边 + 留白"处
-	#    下一行的下推量 = 上一行下推量 - 行间距（gap）
-	#    因为"下推 d 后，行间空档会缩短 d"
-	#    → 下推量逐行减去 gap，直到归零
-	var push_by_col_row: Dictionary = {}
-	if nav_open:
-		for col_i in covered_cols:
-			var d_prev: float = 0.0
-			var n_rows: int = (_cell_buttons.size() + cols - 1) / cols
-			for row_i in range(n_rows):
-				var d: float = 0.0
-				if row_i == 0:
-					var top_s: float = float(top) + float(padding)
-					d = maxf(0.0, nav_bottom + NAV_DRAWER_GAP - top_s)
-				else:
-					d = maxf(0.0, d_prev - gap)
-				push_by_col_row["%d:%d" % [col_i, row_i]] = d
-				d_prev = d
-				if d <= 0.0:
-					break
-
-	# 3. 应用
+func _layout_grid_card_targets(
+	cols: int,
+	cell_w: float,
+	cell_h: float,
+	gap: float,
+	shadow_h: float,
+	should_animate: bool,
+	push_by_col_row: Dictionary,
+	left_push_by_col_row: Dictionary
+) -> float:
+	var max_target_bottom: float = 0.0
 	for i in range(_cell_buttons.size()):
 		var btn: Button = _cell_buttons[i]
 		if not is_instance_valid(btn):
@@ -986,6 +1564,9 @@ func _relayout() -> void:
 			var key: String = "%d:%d" % [col, row]
 			if push_by_col_row.has(key):
 				target_y += float(push_by_col_row[key])
+			if left_push_by_col_row.has(key):
+				target_x -= float(left_push_by_col_row[key])
+			max_target_bottom = maxf(max_target_bottom, target_y + cell_h + shadow_h)
 
 			wrapper.set_meta("target_pos", Vector2(target_x, target_y))
 			wrapper.custom_minimum_size = Vector2(cell_w, cell_h + shadow_h)
@@ -999,9 +1580,20 @@ func _relayout() -> void:
 		# btn 底部让出的阴影高度要跟 wrapper 的高度用同一尺度（乘 s），
 		# 否则缩窗后 btn 比 wrapper 内容区高、卡片溢出格子
 		btn.offset_bottom = -shadow_h
-		var cover: TextureRect = btn.get_meta("cover_rect", null)
-		if cover != null:
-			cover.custom_minimum_size = Vector2(cell_w, cell_h)
+		# v7: render the CRT image as a direct child of _grid, OUTSIDE
+		# the hidden wrapper. Keep geometry aligned with the actual card.
+		var crt_proxy: TextureRect = btn.get_meta("crt_proxy", null)
+		if is_instance_valid(crt_proxy):
+			var crt_offset: float = 0.0
+			if crt_proxy.visible:
+				var crt_mat: ShaderMaterial = crt_proxy.material as ShaderMaterial
+				if crt_mat != null:
+					crt_offset = _crt_single_cover_offset(float(crt_mat.get_shader_parameter("crt_ms")))
+			crt_proxy.position = wrapper.position + Vector2(0.0, crt_offset)
+			crt_proxy.size = Vector2(cell_w, cell_h)
+		# cover_rect uses PRESET_FULL_RECT and EXPAND_IGNORE_SIZE. Giving it
+		# a minimum size propagates through the Button's theme padding,
+		# enlarging the Button by 8px and cropping the 2:3 poster.
 		var ov: Panel = btn.get_meta("overlay", null)
 		if ov != null:
 			ov.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -1009,43 +1601,27 @@ func _relayout() -> void:
 		# pivot 在卡片中心：整体放大更自然
 		btn.pivot_offset = Vector2(btn.size.x * 0.5, btn.size.y * 0.5)
 
-	# 内容总高（让 ScrollContainer 能滚）
-	if _grid != null:
-		var rows: int = (_cell_buttons.size() + cols - 1) / cols
-		_grid.custom_minimum_size.y = float(rows) * (cell_h + gap + shadow_h)
 
-	var sidebar_base: int = _font_size("game_sidebar", 14)
-	for item in _sidebar_items:
-		if is_instance_valid(item):
-			# 行高要放得下放大的字 → 用 fs
-			item.custom_minimum_size.y = SIDEBAR_ITEM_H_BASE * fs
-			var logo: TextureRect = item.get_meta("logo", null)
-			if logo != null:
-				logo.custom_minimum_size = Vector2(SIDEBAR_LOGO_SZ_BASE * s, SIDEBAR_LOGO_SZ_BASE * s)
-			var name_lbl: Label = item.get_meta("name_lbl", null)
-			if name_lbl != null:
-				name_lbl.add_theme_font_size_override("font_size", int(float(sidebar_base) * fs))
-			# tooltip 也跟字号曲线走
-			var tip_lbl: Label = item.get_meta("tip_lbl", null)
-			if tip_lbl != null:
-				tip_lbl.add_theme_font_size_override("font_size", int(float(sidebar_base) * fs))
+	return max_target_bottom
 
-# ---------------------------------------------------------------------------
-# 数据
-
+# WB-05：把卡片几何同步给 CRT 壳层 / 封面 shader / 亮线叠加层。
 func set_games(arr: Array[Dictionary]) -> void:
-	# 简单比对，如果数据完全没变，就不重建了，省去无谓的性能开销
-	if arr.size() == _all_games.size():
-		var identical: bool = true
-		for i in range(arr.size()):
-			if str(arr[i].get("id", "")) != str(_all_games[i].get("id", "")):
-				identical = false
-				break
-			# 如果时长之类的更新了，ID 虽然一样，但我们需要重建来刷新侧边栏信息
-			# 所以这里只拦截：大小和顺序完全一样，且没有任何变动的情况
-			# 其实最简单的就是保留原有逻辑，加上上面的纹理缓存就完全足够了
+	var perf_set_games_started_msec: int = Time.get_ticks_msec()
+	# Reuse existing cards only when the complete payload is unchanged.
+	# Full dictionary comparison preserves updates to playtime, metadata, and cover paths.
+	if arr == _all_games:
+		return
 	_all_games = arr
 	_rebuild_view()
+
+func resolve_games_by_ids(item_ids: Array) -> Array[Dictionary]:
+	var resolved: Array[Dictionary] = []
+	for item_id in item_ids:
+		for game in _all_games:
+			if str(game.get("id")) == str(item_id):
+				resolved.append(game)
+				break
+	return resolved
 
 func _rebuild_view() -> void:
 	var filtered: Array[Dictionary] = []
@@ -1100,11 +1676,8 @@ func _rebuild_view() -> void:
 	_refresh_selection()
 	if not games.is_empty():
 		selection_changed.emit(selected_index, games[selected_index])
-	# 空状态：无游戏时启动"添加"按钮光晕呼吸
-	_add_glow_breathe = games.is_empty()
-	if not _add_glow_breathe and not _add_btn_hovered:
-		# 从空变有 → 关掉呼吸
-		_animate_add_glow(0.0)
+	lab_cover_samples_changed.emit()
+	# 空状态不再有光晕呼吸（WB-04.1-F 移除了光晕层），hover 反馈改为缩放。
 
 func _on_search_changed(text: String) -> void:
 	_search_text = text
@@ -1122,7 +1695,24 @@ func _on_search_icon_toggled(pressed: bool) -> void:
 		_search_field.grab_focus()
 	_relayout()
 
+func _load_sort_mode() -> void:
+	var config := ConfigFile.new()
+	if config.load(SORT_CONFIG_PATH) != OK:
+		return
+	var saved: String = str(config.get_value("games", "sort_mode", "name"))
+	if saved in ["name", "playtime", "recent"]:
+		_sort_mode = saved
+
+func _save_sort_mode() -> void:
+	var config := ConfigFile.new()
+	config.set_value("games", "sort_mode", _sort_mode)
+	var result: Error = config.save(SORT_CONFIG_PATH)
+	if result != OK:
+		push_warning("Unable to save game sorting preference: %s" % result)
+
+
 func _on_sort_icon_pressed() -> void:
+	UISfx.play(&"sort_cycle")
 	# 循环：name → playtime → recent → name
 	if _sort_mode == "name":
 		_sort_mode = "playtime"
@@ -1130,16 +1720,20 @@ func _on_sort_icon_pressed() -> void:
 		_sort_mode = "recent"
 	else:
 		_sort_mode = "name"
+	_save_sort_mode()
 	_update_sort_icon()
+	_sort_only_rebuild = true
 	_rebuild_should_pop = true
 	_rebuild_view()
 
 func _update_sort_icon() -> void:
 	if _sort_icon_btn == null:
 		return
-	var tex: Texture2D = _load_svg_icon("sort_%s" % _sort_mode, 80.0 / 24.0)
+	var px: int = _tool_icon_px if _tool_icon_px > 0 else _tool_icon_size(_font_scale)
+	var tex: Texture2D = _load_svg_icon("sort_%s" % _sort_mode, px)
 	if tex != null:
 		_sort_icon_btn.icon = tex
+	# 排序图标换了纹理，尺寸缓存继续沿用当前工具图标像素；expand_icon 关闭后按纹理原尺寸绘制。
 	var label_map: Dictionary = {
 		"name": "名称",
 		"playtime": "时长",
@@ -1151,8 +1745,13 @@ func _update_sort_icon() -> void:
 # 侧边栏列表
 
 func _rebuild_sidebar() -> void:
+	_sidebar_active_tip = null
+	_sidebar_active_tip_label = null
 	for it in _sidebar_items:
 		if is_instance_valid(it):
+			var old_tip: Variant = it.get_meta("tip", null)
+			if old_tip is PanelContainer and is_instance_valid(old_tip):
+				old_tip.queue_free()
 			it.queue_free()
 	_sidebar_items.clear()
 	for i in range(games.size()):
@@ -1227,10 +1826,15 @@ func _make_sidebar_item(index: int, game: Dictionary) -> Button:
 	var tip := PanelContainer.new()
 	tip.visible = false
 	tip.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	tip.z_index = 100
+	tip.z_index = 0  # Parent overlay owns the high z-order; avoid exceeding CanvasItem limits.
 	var tip_style := StyleBoxFlat.new()
-	tip_style.bg_color = Color(0.05, 0.07, 0.10, 0.95)
-	tip_style.set_corner_radius_all(4)
+	tip_style.bg_color = Color(0.14, 0.18, 0.26, 0.98)
+	tip_style.border_width_left = 1
+	tip_style.border_width_top = 1
+	tip_style.border_width_right = 1
+	tip_style.border_width_bottom = 1
+	tip_style.border_color = Color(0.34, 0.45, 0.62, 0.28)
+	tip_style.set_corner_radius_all(3)
 	tip_style.content_margin_left = 8.0
 	tip_style.content_margin_right = 8.0
 	tip_style.content_margin_top = 4.0
@@ -1243,12 +1847,17 @@ func _make_sidebar_item(index: int, game: Dictionary) -> Button:
 	tip.add_child(tip_lbl)
 	if _font_manager != null:
 		_apply_font_to_label(tip_lbl, "game_sidebar")
-	btn.add_child(tip)
+	if _sidebar_tip_layer != null:
+		_sidebar_tip_layer.add_child(tip)
+	else:
+		# Defensive fallback for unusual construction order; normal configure()
+		# creates the overlay before game rows are populated.
+		btn.add_child(tip)
 	tip.set_meta("tip_is_custom", true)
 	btn.set_meta("tip", tip)
 	btn.set_meta("tip_lbl", tip_lbl)
 
-	btn.mouse_entered.connect(func(): btn.set_meta("hovered", true); _refresh_sidebar_styles())
+	btn.mouse_entered.connect(func(): btn.set_meta("hovered", not _exit_cooldown); _refresh_sidebar_styles())
 	btn.mouse_exited.connect(func(): btn.set_meta("hovered", false); _refresh_sidebar_styles())
 	btn.pressed.connect(_on_sidebar_pressed.bind(index))
 	return btn
@@ -1257,8 +1866,63 @@ func _make_sidebar_item(index: int, game: Dictionary) -> Button:
 # 海报墙卡片
 
 func _rebuild_grid() -> void:
+	_cover_queue_batching = true
+	_card_springs_enabled = false
+	# Generation invalidates every animation and deferred decoder callback.
+	_crt_active_cards.clear()
+	_crt_next_start_usec = 0
+	_initial_wall_order_wait_usec = 0
+	var perf_grid_started_msec: int = Time.get_ticks_msec()
+	_perf_grid_generation += 1
+	# An empty backend response must not consume the first reveal. A new
+	# generation can replace a pending one without making cached cards final.
+	_crt_boot_generation = _perf_grid_generation if _initial_wall_reveal_pending and not games.is_empty() else -1
+	_perf_grid_started_msec = perf_grid_started_msec
+	_perf_grid_cache_hits = 0
+	_perf_grid_async_queued = 0
+	_perf_grid_async_pending = 0
+	_perf_grid_first_cover_logged = false
+	_perf_cover_queue_wait_total_ms = 0.0
+	_perf_cover_queue_wait_max_ms = 0.0
+	_perf_cover_file_read_total_ms = 0.0
+	_perf_cover_file_read_max_ms = 0.0
+	_perf_cover_decode_total_ms = 0.0
+	_perf_cover_decode_max_ms = 0.0
+	_perf_cover_apply_total_ms = 0.0
+	_perf_cover_apply_max_ms = 0.0
+	_perf_cover_apply_queue_wait_total_ms = 0.0
+	_perf_cover_apply_queue_wait_max_ms = 0.0
+	_perf_cover_image_decode_total_ms = 0.0
+	_perf_cover_image_decode_max_ms = 0.0
+	_perf_cover_resize_total_ms = 0.0
+	_perf_cover_resize_max_ms = 0.0
+	_perf_cover_mipmap_total_ms = 0.0
+	_perf_cover_mipmap_max_ms = 0.0
+	_perf_cover_texture_create_total_ms = 0.0
+	_perf_cover_texture_create_max_ms = 0.0
+	_perf_cover_texture_assign_total_ms = 0.0
+	_perf_cover_texture_assign_max_ms = 0.0
+	_perf_cover_animated_check_total_ms = 0.0
+	_perf_cover_animated_check_max_ms = 0.0
+	_perf_cover_reveal_request_total_ms = 0.0
+	_perf_cover_reveal_request_max_ms = 0.0
+	_perf_cover_plugin_load_elapsed_total_ms = 0.0
+	_perf_cover_plugin_load_elapsed_max_ms = 0.0
+	_perf_cover_source_pixels_total = 0
+	_perf_cover_output_pixels_total = 0
+	_perf_cover_resized_count = 0
+	_perf_cover_decoded_image_samples = 0
+	_perf_cover_apply_queue_peak = _cover_apply_queue.size()
+	_perf_cover_stage_detail_logs = 0
+	_perf_cover_samples = 0
+	_perf_cover_peak_active = 0
 	for c in _cell_buttons:
 		if is_instance_valid(c):
+			# v7: the temporary CRT display belongs to _grid, NOT to wrapper.
+			# It must be freed separately when a grid generation is replaced.
+			var old_proxy: TextureRect = c.get_meta("crt_proxy", null)
+			if is_instance_valid(old_proxy):
+				old_proxy.queue_free()
 			var wrap: Control = c.get_meta("wrapper", null)
 			if wrap != null and is_instance_valid(wrap):
 				wrap.queue_free()
@@ -1299,6 +1963,16 @@ func _rebuild_grid() -> void:
 			# 其他场景（启动 / 数据刷新 / 切库）→ 直接到位
 			w.position = tp
 			w.set_meta("vel", Vector2.ZERO)
+	_cover_queue_batching = false
+	# A second grid build during boot (often an empty response followed by
+	# real data) must still be allowed to perform the first CRT reveal.
+	if not _initial_wall_reveal_pending:
+		_crt_show_cached_on_rebuild()
+	_card_springs_enabled = true
+	_prioritize_cover_load_queue()
+	_pump_cover_load_queue()
+	_crt_schedule_visible_covers()
+	_sort_only_rebuild = false
 
 func _make_grid_cell(index: int, game: Dictionary) -> Button:
 	# wrapper 是 _grid 里的格子，比卡片高 SHADOW_H_BASE，下面留阴影空间
@@ -1309,46 +1983,54 @@ func _make_grid_cell(index: int, game: Dictionary) -> Button:
 	# 卡片本体：占 wrapper 上部，底部让出 SHADOW_H_BASE 给阴影
 	var btn := Button.new()
 	btn.focus_mode = Control.FOCUS_NONE
+	# The cover is sized by its anchors, not by the Button minimum-size chain.
+	# Otherwise the Button grows beyond the 2:3 wrapper by theme margins.
+	btn.custom_minimum_size = Vector2.ZERO
 	btn.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
-	btn.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	# 底部让出的阴影高度要跟 _relayout 里 wrapper 的高度用同一尺度（乘 _ui_scale），
-	# 否则缩窗时 btn 会比 wrapper 的内容区高，卡片会溢出格子
-	btn.offset_bottom = -SHADOW_H_BASE * _ui_scale
+	# Button is parented to wrapper near the end of this function. Its anchors
+	# and offsets are set after parenting so the preset uses the real parent rect.
 	btn.set_meta("game_index", index)
 	btn.set_meta("wrapper", wrapper)
 	# 阴影直接用 StyleBoxFlat 画（带圆角的投影，跟着卡片一起放大）
 	var bg := StyleBoxFlat.new()
-	bg.bg_color = Color(0.205, 0.245, 0.305, 1.0)
+	# Never put an opaque placeholder behind the poster. Even translucent
+	# cover art must not expose a grey card-body rectangle.
+	bg.bg_color = Color(0.205, 0.245, 0.305, 0.0)
 	bg.set_corner_radius_all(6)
 	# A1: a hairline edge gives the poster a physical boundary without a glass frame.
-	bg.set_border_width_all(1)
-	bg.border_color = Color(0.62, 0.73, 0.86, 0.14)
-	bg.shadow_color = Color(0, 0, 0, SHADOW_IDLE_ALPHA)
-	bg.shadow_size = int(SHADOW_IDLE_SIZE)
-	bg.shadow_offset = Vector2(SHADOW_IDLE_OX, SHADOW_IDLE_OY)
+	bg.set_border_width_all(0)
+	# Prevent the Button theme content margins from expanding the 2:3 cover.
+	bg.set_content_margin_all(0.0)
+	bg.border_color = Color.TRANSPARENT
+	bg.shadow_color = Color(0, 0, 0, HOVER_H_IDLE_SHADOW_ALPHA)
+	bg.shadow_size = int(HOVER_H_IDLE_SHADOW_SIZE)
+	bg.shadow_offset = Vector2(0.0, HOVER_H_IDLE_SHADOW_OFFSET)
 	btn.add_theme_stylebox_override("normal", bg)
 	# hover / pressed / focus 都用同一个（悬停时的变化在 _refresh_grid_styles 里做）
 	btn.add_theme_stylebox_override("hover", bg)
 	btn.add_theme_stylebox_override("pressed", bg)
 	btn.add_theme_stylebox_override("focus", bg)
 	btn.set_meta("bg_style", bg)
-	# 阴影平滑过渡用的"当前值 / 目标值"（tween_property 对 StyleBoxFlat
-	# 的 shadow_* 不生效，改在 _process 里手动 lerp）
-	btn.set_meta("shadow_cur_size", SHADOW_IDLE_SIZE)
-	btn.set_meta("shadow_cur_ox", SHADOW_IDLE_OX)
-	btn.set_meta("shadow_cur_oy", SHADOW_IDLE_OY)
-	btn.set_meta("shadow_cur_alpha", SHADOW_IDLE_ALPHA)
-	btn.set_meta("shadow_tgt_size", SHADOW_IDLE_SIZE)
-	btn.set_meta("shadow_tgt_ox", SHADOW_IDLE_OX)
-	btn.set_meta("shadow_tgt_oy", SHADOW_IDLE_OY)
-	btn.set_meta("shadow_tgt_alpha", SHADOW_IDLE_ALPHA)
-	btn.set_meta("shadow_state", 0)   # 0 = 未悬停，1 = 悬停
+	# The shell must never appear before a *real* poster is available.
+	# Keep the input/hitbox and grid layout intact, but hide every Button
+	# style state (including hover) until the CRT effect has finished.
+	_crt_hide_card_shell(btn)
+	wrapper.modulate.a = 0.0
+	btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Hover transform only affects the card, not its wrapper/layout spring.
+	btn.set_meta("hover_h_state", 0)
+	btn.set_meta("hover_h_progress", 0.0)
+	btn.set_meta("hover_g_progress", 0.0)
+	btn.set_meta("click_e_scale", 1.0)
+	btn.scale = Vector2.ONE
+	btn.position = Vector2.ZERO
 
 	var cover_wrap := Control.new()
 	cover_wrap.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	cover_wrap.clip_contents = true
 	cover_wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	btn.add_child(cover_wrap)
+	btn.set_meta("cover_wrap", cover_wrap)
 
 	var cover_rect := TextureRect.new()
 	cover_rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -1359,7 +2041,8 @@ func _make_grid_cell(index: int, game: Dictionary) -> Button:
 	cover_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	# 灰度 shader：不可启动的游戏 → 降饱和
 	var gray_mat := ShaderMaterial.new()
-	gray_mat.shader = CARD_GRAY_SHADER
+	gray_mat.shader = CARD_COVER_SHADER
+	gray_mat.set_shader_parameter("crt_ms", -1.0)
 	var is_playable: bool = bool(game.get("playable", true))
 	gray_mat.set_shader_parameter(
 		"saturation",
@@ -1369,11 +2052,16 @@ func _make_grid_cell(index: int, game: Dictionary) -> Button:
 	cover_rect.material = gray_mat
 	btn.set_meta("gray_mat", gray_mat)
 	var cover_path: String = str(game.get("cover", "")).replace("\\", "/")
+	btn.set_meta("cover_path", cover_path)
+	btn.set_meta("cover_load_pending", false)
+	btn.set_meta("cover_loaded", false)
+	btn.set_meta("crt_started", false)
 	if not cover_path.is_empty() and FileAccess.file_exists(cover_path):
 		# 优先从缓存读取，秒出图，防闪烁
 		if _cover_texture_cache.has(cover_path):
+			_perf_grid_cache_hits += 1
 			cover_rect.texture = _cover_texture_cache[cover_path]
-			_check_animated(cover_path, btn)
+			btn.set_meta("cover_loaded", true)
 		else:
 			# 没缓存才走异步加载
 			_load_cover_async(cover_rect, cover_path, btn)
@@ -1388,23 +2076,42 @@ func _make_grid_cell(index: int, game: Dictionary) -> Button:
 	cover_wrap.add_child(anim_holder)
 	btn.set_meta("anim_holder", anim_holder)
 
-	# 悬停亮度层：叠一层浅白，悬停时淡入
-	var brightness_layer := ColorRect.new()
-	brightness_layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	brightness_layer.color = Color(1.0, 1.0, 1.0, 0.0)
-	brightness_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	cover_wrap.add_child(brightness_layer)
-	btn.set_meta("brightness_layer", brightness_layer)
+	# Wide phosphor/beam halo. No permanent frame and no blank-card layer.
+	var crt_halo := ColorRect.new()
+	crt_halo.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	crt_halo.offset_left = -20.0
+	crt_halo.offset_top = -20.0
+	crt_halo.offset_right = 20.0
+	crt_halo.offset_bottom = 20.0
+	crt_halo.color = Color.WHITE
+	crt_halo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	crt_halo.visible = false
+	var crt_halo_mat := ShaderMaterial.new()
+	crt_halo_mat.shader = CARD_CRT_HALO_SHADER
+	crt_halo.material = crt_halo_mat
+	btn.add_child(crt_halo)
+	btn.set_meta("crt_halo", crt_halo)
 
 	var overlay := Panel.new()
 	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var ov_style := StyleBoxFlat.new()
 	ov_style.bg_color = Color(0, 0, 0, 0)
-	ov_style.set_corner_radius_all(6)
+	ov_style.set_corner_radius_all(0)
+	ov_style.set_border_width_all(HOVER_H_BORDER_WIDTH)
+	ov_style.border_color = Color(HOVER_H_ACTIVE_BORDER.r, HOVER_H_ACTIVE_BORDER.g, HOVER_H_ACTIVE_BORDER.b, 0.0)
 	overlay.add_theme_stylebox_override("panel", ov_style)
+	btn.set_meta("hover_outline_style", ov_style)
 	btn.add_child(overlay)
 	btn.set_meta("overlay", overlay)
+
+	# E click lab: translucent white material flash, separate from the H+G hover overlay.
+	var click_flash := ColorRect.new()
+	click_flash.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	click_flash.color = Color(1.0, 1.0, 1.0, 0.0)
+	click_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	btn.add_child(click_flash)
+	btn.set_meta("click_e_flash", click_flash)
 
 	# 批量模式下的复选框
 	var check := CheckBox.new()
@@ -1434,6 +2141,43 @@ func _make_grid_cell(index: int, game: Dictionary) -> Button:
 	btn.set_meta("glow_layer", glow_layer)
 
 	wrapper.add_child(btn)
+	btn.set_anchors_preset(Control.PRESET_FULL_RECT)
+	btn.offset_left = 0.0
+	btn.offset_top = 0.0
+	btn.offset_right = 0.0
+	# Keep the existing bottom space reserved for the card shadow.
+	btn.offset_bottom = -SHADOW_H_BASE * _ui_scale
+
+	# v7: The previously hidden wrapper must NEVER become visible merely
+	# to show the CRT beam. The proxy lives directly under _grid (inside the
+	# same scroll viewport), not under any card/wrapper/UI shell. Only the
+	# fully decoded genuine poster is assigned to this temporary display.
+	var crt_proxy := TextureRect.new()
+	_grid.add_child(crt_proxy)
+	crt_proxy.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	crt_proxy.position = Vector2.ZERO
+	crt_proxy.size = Vector2.ONE
+	crt_proxy.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	crt_proxy.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	crt_proxy.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	crt_proxy.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	crt_proxy.visible = false
+	var crt_proxy_mat := ShaderMaterial.new()
+	crt_proxy_mat.shader = CARD_COVER_SHADER
+	crt_proxy_mat.set_shader_parameter("crt_ms", -1.0)
+	crt_proxy_mat.set_shader_parameter("saturation", 1.0 if is_playable else CARD_UNPLAYABLE_SATURATION)
+	crt_proxy_mat.set_shader_parameter("brightness", 1.0)
+	crt_proxy.material = crt_proxy_mat
+	btn.set_meta("crt_proxy", crt_proxy)
+	# The glow must also be outside the hidden Button. Keep its original
+	# shader, sizes and animation parameters unchanged.
+	btn.remove_child(crt_halo)
+	crt_proxy.add_child(crt_halo)
+	crt_halo.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	crt_halo.offset_left = -20.0
+	crt_halo.offset_top = -20.0
+	crt_halo.offset_right = 20.0
+	crt_halo.offset_bottom = 20.0
 
 	btn.pressed.connect(_on_grid_pressed.bind(index))
 	btn.gui_input.connect(_on_grid_input.bind(index, game))
@@ -1481,8 +2225,16 @@ func _refresh_sidebar_styles() -> void:
 		if btn.has_meta("name_lbl"):
 			name_lbl = btn.get_meta("name_lbl") as Label
 		if name_lbl != null:
+			var sidebar_settings: Dictionary = _font_manager.get_field_settings("game_sidebar", "games") if _font_manager != null else {}
+			var normal_hex := str(sidebar_settings.get("font_color", "")).strip_edges()
+			var selected_hex := str(sidebar_settings.get("selected_color", "")).strip_edges()
+			var is_selected := _sidebar_detail_highlight and i == selected_index
 			var color := SIDEBAR_TEXT
-			if is_hov:
+			if not normal_hex.is_empty():
+				color = Color.from_string(normal_hex, SIDEBAR_TEXT)
+			if is_selected:
+				color = Color.from_string(selected_hex, SIDEBAR_TEXT_SEL) if not selected_hex.is_empty() else SIDEBAR_TEXT_SEL
+			elif is_hov:
 				color = Color(1.0, 1.0, 1.0, 1.0)
 			name_lbl.add_theme_color_override("font_color", color)
 
@@ -1490,22 +2242,20 @@ func _refresh_sidebar_styles() -> void:
 		_update_sidebar_tip(btn, is_hov)
 
 func _update_sidebar_tip(btn: Button, is_hov: bool) -> void:
-	"""只在名字被省略号截断且 hover 时，显示自定义 tooltip（贴同行右侧）。"""
+	"""只在名字被省略号截断且 hover 时，在原文字位置同行展开完整名称。"""
 	var tip: Variant = btn.get_meta("tip", null)
 	if not (tip is PanelContainer):
 		return
 	var tip_node: PanelContainer = tip as PanelContainer
-	var name_lbl: Label = null
-	if btn.has_meta("name_lbl"):
-		name_lbl = btn.get_meta("name_lbl") as Label
-	if name_lbl == null or not is_instance_valid(name_lbl):
+	var name_lbl: Label = btn.get_meta("name_lbl", null) as Label
+	if name_lbl == null or not is_instance_valid(name_lbl) or not is_hov:
 		tip_node.visible = false
-		return
-	if not is_hov:
-		tip_node.visible = false
+		if _sidebar_active_tip == tip_node:
+			_sidebar_active_tip = null
+			_sidebar_active_tip_label = null
 		return
 
-	# 判断是否被截断：整串文字宽度 > 可用宽度
+	# 判断是否被截断：整串文字宽度 > 可用宽度。
 	var font: Font = name_lbl.get_theme_font("font")
 	var fs_base: int = name_lbl.get_theme_font_size("font_size")
 	var full_w: float = 0.0
@@ -1514,129 +2264,177 @@ func _update_sidebar_tip(btn: Button, is_hov: bool) -> void:
 			name_lbl.text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs_base
 		).x
 	var avail_w: float = name_lbl.size.x
-	var truncated: bool = full_w > avail_w + 2.0
-	if not truncated:
+	if full_w <= avail_w + 2.0:
 		tip_node.visible = false
+		if _sidebar_active_tip == tip_node:
+			_sidebar_active_tip = null
+			_sidebar_active_tip_label = null
 		return
 
-	tip_node.position = Vector2(
-		name_lbl.position.x + name_lbl.size.x + 8.0,
-		name_lbl.position.y
-	)
+	# The overlay begins at the original text origin (not after the ellipsis),
+	# so the complete title replaces the shortened label in the same row.
+	var tip_lbl: Label = btn.get_meta("tip_lbl", null) as Label
+	if tip_lbl != null:
+		tip_lbl.text = name_lbl.text
+		tip_lbl.autowrap_mode = TextServer.AUTOWRAP_OFF
+	var tip_minimum: Vector2 = tip_node.custom_minimum_size
+	tip_minimum.x = full_w + 16.0
+	tip_node.custom_minimum_size = tip_minimum
+	tip_node.size = tip_node.get_combined_minimum_size()
 	tip_node.visible = true
+	_sidebar_active_tip = tip_node
+	_sidebar_active_tip_label = name_lbl
+	_sync_sidebar_tip_position()
+
+
+func _sync_sidebar_tip_position() -> void:
+	if _sidebar_active_tip == null or not is_instance_valid(_sidebar_active_tip):
+		_sidebar_active_tip = null
+		_sidebar_active_tip_label = null
+		return
+	if _sidebar_active_tip_label == null or not is_instance_valid(_sidebar_active_tip_label):
+		_sidebar_active_tip.visible = false
+		_sidebar_active_tip = null
+		_sidebar_active_tip_label = null
+		return
+	if not _sidebar_active_tip_label.is_visible_in_tree():
+		_sidebar_active_tip.visible = false
+		_sidebar_active_tip = null
+		_sidebar_active_tip_label = null
+		return
+
+	var label_rect: Rect2 = _sidebar_active_tip_label.get_global_rect()
+	if _sidebar_scroll == null or not _sidebar_scroll.get_global_rect().intersects(label_rect):
+		_sidebar_active_tip.visible = false
+		_sidebar_active_tip = null
+		_sidebar_active_tip_label = null
+		return
+	var tip_size: Vector2 = _sidebar_active_tip.size
+	_sidebar_active_tip.global_position = Vector2(
+		label_rect.position.x - 8.0,
+		label_rect.position.y + (label_rect.size.y - tip_size.y) * 0.5
+	)
+
+# Invert CSS cubic-bezier x(t) so the Godot tween follows the same time curve.
+func _hover_css_bezier(fraction: float, x1: float, y1: float, x2: float, y2: float) -> float:
+	var low: float = 0.0
+	var high: float = 1.0
+	for _iteration in range(20):
+		var t: float = (low + high) * 0.5
+		var inv: float = 1.0 - t
+		var curve_x: float = 3.0 * inv * inv * t * x1 + 3.0 * inv * t * t * x2 + t * t * t
+		if curve_x < fraction:
+			low = t
+		else:
+			high = t
+	var t: float = (low + high) * 0.5
+	var inv: float = 1.0 - t
+	return 3.0 * inv * inv * t * y1 + 3.0 * inv * t * t * y2 + t * t * t
+
+func _hover_h_ease(fraction: float) -> float:
+	return _hover_css_bezier(fraction, 0.25, 0.1, 0.25, 1.0)
+
+func _hover_g_ease(fraction: float) -> float:
+	return _hover_css_bezier(fraction, 0.25, 0.8, 0.25, 1.0)
+
+func _hover_g_apply(progress: float, btn: Button) -> void:
+	if not is_instance_valid(btn):
+		return
+	btn.set_meta("hover_g_progress", progress)
+	# CSS transform-origin: 50% 50%, scale only; no translateY.
+	btn.pivot_offset = btn.size * 0.5
+	var factor: float = lerpf(1.0, HOVER_G_SCALE, progress) * float(btn.get_meta("click_e_scale", 1.0))
+	btn.scale = Vector2(factor, factor)
+
+func _hover_g_animate(fraction: float, btn: Button, start: float, finish: float) -> void:
+	_hover_g_apply(lerpf(start, finish, _hover_g_ease(fraction)), btn)
+
+func _hover_h_apply(progress: float, btn: Button) -> void:
+	if not is_instance_valid(btn):
+		return
+	btn.set_meta("hover_h_progress", progress)
+	var bg: StyleBoxFlat = btn.get_meta("bg_style", null)
+	if bg != null:
+		bg.shadow_size = int(round(lerpf(HOVER_H_IDLE_SHADOW_SIZE, HOVER_H_ACTIVE_SHADOW_SIZE, progress) * _ui_scale))
+		bg.shadow_offset = Vector2(0.0, lerpf(HOVER_H_IDLE_SHADOW_OFFSET, HOVER_H_ACTIVE_SHADOW_OFFSET, progress) * _ui_scale)
+		bg.shadow_color = Color(0.0, 0.0, 0.0, lerpf(HOVER_H_IDLE_SHADOW_ALPHA, HOVER_H_ACTIVE_SHADOW_ALPHA, progress))
+	var outline: StyleBoxFlat = btn.get_meta("hover_outline_style", null)
+	if outline != null:
+		outline.border_color = Color(HOVER_H_ACTIVE_BORDER.r, HOVER_H_ACTIVE_BORDER.g, HOVER_H_ACTIVE_BORDER.b, HOVER_H_ACTIVE_BORDER.a * progress)
+	var mat: ShaderMaterial = btn.get_meta("gray_mat", null)
+	if mat != null:
+		mat.set_shader_parameter("brightness", lerpf(1.0, HOVER_H_BRIGHTNESS, progress) * float(btn.get_meta("click_e_brightness", 1.0)))
+
+func _hover_h_animate(fraction: float, btn: Button, start: float, finish: float) -> void:
+	_hover_h_apply(lerpf(start, finish, _hover_h_ease(fraction)), btn)
 
 func _refresh_grid_styles() -> void:
 	for i in range(_cell_buttons.size()):
 		var btn: Button = _cell_buttons[i]
 		if not is_instance_valid(btn):
 			continue
-		var is_hover: bool = (i == _hover_index)
-
-		# 阴影：只更新"目标值"，实际写回 stylebox 由 _update_shadow_lerp 每帧插值。
-		# 注意：_process 的 hover 检测每次变化都会调本函数；只有"状态真的变了"
-		# 才改目标，否则反复覆盖会让平滑过渡永远跑不完。
-		var target_state: int = 1 if is_hover else 0
-		var cur_state: int = int(btn.get_meta("shadow_state", -1))
-		if cur_state != target_state:
-			btn.set_meta("shadow_state", target_state)
-			var card_style: StyleBoxFlat = btn.get_meta("bg_style", null)
-			if card_style != null:
-				# A1: reflected edge responds to focus; no animation loop or material allocation.
-				card_style.border_color = Color(0.72, 0.83, 0.96, 0.45 if target_state == 1 else 0.14)
-			if target_state == 1:
-				# 悬停：更浅 + 更大更散的投影
-				btn.set_meta("shadow_tgt_size", SHADOW_HOVER_SIZE)
-				btn.set_meta("shadow_tgt_ox", SHADOW_HOVER_OX)
-				btn.set_meta("shadow_tgt_oy", SHADOW_HOVER_OY)
-				btn.set_meta("shadow_tgt_alpha", SHADOW_HOVER_ALPHA)
-			else:
-				# 未悬停：与 _make_grid_cell 的初值同源 → 移开精确回到启动值
-				btn.set_meta("shadow_tgt_size", SHADOW_IDLE_SIZE)
-				btn.set_meta("shadow_tgt_ox", SHADOW_IDLE_OX)
-				btn.set_meta("shadow_tgt_oy", SHADOW_IDLE_OY)
-				btn.set_meta("shadow_tgt_alpha", SHADOW_IDLE_ALPHA)
-
-		# 悬停：整体轻微放大（1.03），先快后慢
-		var target: float = 1.03 if is_hover else 1.0
-		if absf(btn.scale.x - target) >= 0.001:
-			# pivot 在底边中心：卡片只往上长，底部不动，阴影不被盖
-			btn.pivot_offset = Vector2(btn.size.x * 0.5, btn.size.y)
-			if btn.has_meta("scale_tween"):
-				var olds: Tween = btn.get_meta("scale_tween")
-				if olds != null and olds.is_valid():
-					olds.kill()
-			var tw := create_tween()
-			tw.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
-			tw.tween_property(btn, "scale", Vector2.ONE * target, 0.28)
-			btn.set_meta("scale_tween", tw)
-
-		# 悬停：叠一层浅白，亮度增强
-		var brightness_layer: ColorRect = btn.get_meta("brightness_layer", null)
-		if brightness_layer != null:
-			var target_a: float = 0.05 if is_hover else 0.0
-			if absf(brightness_layer.color.a - target_a) >= 0.001:
-				if btn.has_meta("brightness_tween"):
-					var oldt: Tween = btn.get_meta("brightness_tween")
-					if oldt != null and oldt.is_valid():
-						oldt.kill()
-				var tw2 := create_tween()
-				tw2.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
-				tw2.tween_property(brightness_layer, "color:a", target_a, 0.25)
-				btn.set_meta("brightness_tween", tw2)
-
-func _update_shadow_lerp(delta: float) -> void:
-	# 阴影平滑过渡：tween_property 对 StyleBoxFlat 的 shadow_* 不生效，
-	# 所以每帧手动朝目标值插值。SHADOW_LERP_SPEED 越大越快到位。
-	const SHADOW_LERP_SPEED: float = 12.0
-	var f: float = 1.0 - exp(-delta * SHADOW_LERP_SPEED)
-	for i in range(_cell_buttons.size()):
-		var btn: Button = _cell_buttons[i]
-		if not is_instance_valid(btn):
+		var target_state: int = 1 if i == _hover_index else 0
+		if int(btn.get_meta("hover_h_state", 0)) == target_state:
 			continue
-		var bg: StyleBoxFlat = btn.get_meta("bg_style", null)
-		if bg == null:
-			continue
-
-		var cur_size: float = float(btn.get_meta("shadow_cur_size", 8.0))
-		var cur_ox: float = float(btn.get_meta("shadow_cur_ox", 1.0))
-		var cur_oy: float = float(btn.get_meta("shadow_cur_oy", 4.0))
-		var cur_alpha: float = float(btn.get_meta("shadow_cur_alpha", 0.5))
-
-		var tgt_size: float = float(btn.get_meta("shadow_tgt_size", 8.0))
-		var tgt_ox: float = float(btn.get_meta("shadow_tgt_ox", 1.0))
-		var tgt_oy: float = float(btn.get_meta("shadow_tgt_oy", 4.0))
-		var tgt_alpha: float = float(btn.get_meta("shadow_tgt_alpha", 0.5))
-
-		cur_size = lerpf(cur_size, tgt_size, f)
-		cur_ox = lerpf(cur_ox, tgt_ox, f)
-		cur_oy = lerpf(cur_oy, tgt_oy, f)
-		cur_alpha = lerpf(cur_alpha, tgt_alpha, f)
-
-		# 收敛判定：差距极小则直接吸附
-		if absf(cur_size - tgt_size) < 0.05:
-			cur_size = tgt_size
-		if absf(cur_ox - tgt_ox) < 0.05:
-			cur_ox = tgt_ox
-		if absf(cur_oy - tgt_oy) < 0.05:
-			cur_oy = tgt_oy
-		if absf(cur_alpha - tgt_alpha) < 0.005:
-			cur_alpha = tgt_alpha
-
-		btn.set_meta("shadow_cur_size", cur_size)
-		btn.set_meta("shadow_cur_ox", cur_ox)
-		btn.set_meta("shadow_cur_oy", cur_oy)
-		btn.set_meta("shadow_cur_alpha", cur_alpha)
-
-		# 写回 stylebox
-		bg.shadow_size = int(round(cur_size))
-		bg.shadow_offset = Vector2(cur_ox, cur_oy)
-		bg.shadow_color = Color(0, 0, 0, cur_alpha)
+		btn.set_meta("hover_h_state", target_state)
+		# H (230ms) and G (250ms) have independent CSS timings.
+		var old_g: Tween = null
+		if btn.has_meta("hover_g_tween"):
+			old_g = btn.get_meta("hover_g_tween")
+		if old_g != null and old_g.is_valid():
+			old_g.kill()
+		var g_start: float = float(btn.get_meta("hover_g_progress", 0.0))
+		var g_tween: Tween = create_tween()
+		g_tween.tween_method(_hover_g_animate.bind(btn, g_start, float(target_state)), 0.0, 1.0, HOVER_G_DURATION).set_trans(Tween.TRANS_LINEAR)
+		btn.set_meta("hover_g_tween", g_tween)
+		# Stop the previous transition to maintain continuity on fast enter/exit.
+		var previous: Tween = null
+		if btn.has_meta("hover_h_tween"):
+			previous = btn.get_meta("hover_h_tween")
+		if previous != null and previous.is_valid():
+			previous.kill()
+		var from_value: float = float(btn.get_meta("hover_h_progress", 0.0))
+		var to_value: float = float(target_state)
+		var tween: Tween = create_tween()
+		tween.tween_method(_hover_h_animate.bind(btn, from_value, to_value), 0.0, 1.0, HOVER_H_DURATION).set_trans(Tween.TRANS_LINEAR)
+		btn.set_meta("hover_h_tween", tween)
 
 func _on_sidebar_pressed(index: int) -> void:
+	if index < 0 or index >= games.size():
+		return
 	_select_index(index)
+	if _detail_view == null:
+		return
+	# Keep the current surface intact until this game's Hero has been decoded
+	# and its GPU texture is ready. The detail F transition then starts with
+	# the Hero already available instead of revealing an empty upper region.
+	_sidebar_pending_detail_index = index
+	_sidebar_pending_detail_id = str(games[index].get("id", ""))
+	_sidebar_pending_media_key = _detail_view.prepare_game_media(games[index], true)
+	if _detail_view.is_game_hero_prepared(_sidebar_pending_media_key):
+		_open_pending_sidebar_detail()
+
+func _on_detail_game_hero_ready(media_key: String, _has_hero: bool) -> void:
+	if _sidebar_pending_detail_index < 0 or media_key != _sidebar_pending_media_key:
+		return
+	_open_pending_sidebar_detail()
+
+func _open_pending_sidebar_detail() -> void:
+	var index: int = _sidebar_pending_detail_index
+	var expected_id: String = _sidebar_pending_detail_id
+	_sidebar_pending_detail_index = -1
+	_sidebar_pending_detail_id = ""
+	_sidebar_pending_media_key = ""
+	if index < 0 or index >= games.size():
+		return
+	if str(games[index].get("id", "")) != expected_id:
+		return
 	_enter_detail(index)
 
 func _on_grid_pressed(index: int) -> void:
+	_sidebar_pending_detail_index = -1
+	_sidebar_pending_detail_id = ""
+	_sidebar_pending_media_key = ""
 	if _exit_cooldown:
 		return
 	
@@ -1651,9 +2449,55 @@ func _on_grid_pressed(index: int) -> void:
 		_update_batch_ui()
 		return
 
-	# 正常模式：进详情页
-	_select_index(index)
-	_enter_detail(index)
+	# E material click feedback: play in place before the existing detail action.
+	# The existing hover H+G remains active; no other cards are animated.
+	if index < 0 or index >= _cell_buttons.size():
+		return
+	var btn: Button = _cell_buttons[index]
+	if not is_instance_valid(btn):
+		return
+	if bool(btn.get_meta("click_e_pending", false)):
+		return
+	# Start media decoding during the existing 360ms click feedback so the
+	# detail transition can begin with a prepared, consistent media set.
+	if _detail_view != null and _detail_view.has_method("prepare_game_media"):
+		_detail_view.call("prepare_game_media", games[index])
+	game_card_clicked.emit()
+	btn.set_meta("click_e_pending", true)
+	var tween: Tween = create_tween()
+	tween.tween_method(_click_e_frame.bind(btn), 0.0, 1.0, 0.36).set_trans(Tween.TRANS_LINEAR)
+	tween.finished.connect(_click_e_complete.bind(btn, index))
+
+func _click_e_frame(fraction: float, btn: Button) -> void:
+	if not is_instance_valid(btn):
+		return
+	# Exact HTML E keyframe timing: press at 23%, material brightness at 20%, flash at 18%.
+	var scale_value: float = lerpf(1.0, 0.975, _hover_css_bezier(fraction / 0.23, 0.22, 0.85, 0.25, 1.0)) if fraction < 0.23 else lerpf(0.975, 1.0, _hover_css_bezier((fraction - 0.23) / 0.77, 0.22, 0.85, 0.25, 1.0))
+	btn.set_meta("click_e_scale", scale_value)
+	_hover_g_apply(float(btn.get_meta("hover_g_progress", 0.0)), btn)
+	var brightness: float = lerpf(1.0, 1.24, fraction / 0.2) if fraction < 0.2 else lerpf(1.24, 1.0, (fraction - 0.2) / 0.8)
+	btn.set_meta("click_e_brightness", brightness)
+	_hover_h_apply(float(btn.get_meta("hover_h_progress", 0.0)), btn)
+	var flash: ColorRect = btn.get_meta("click_e_flash", null)
+	if is_instance_valid(flash):
+		var flash_fraction: float = minf(fraction * (0.36 / 0.35), 1.0)
+		var alpha: float = lerpf(0.0, 0.18, flash_fraction / 0.18) if flash_fraction < 0.18 else lerpf(0.18, 0.0, (flash_fraction - 0.18) / 0.82)
+		flash.color.a = maxf(alpha, 0.0)
+
+func _click_e_complete(btn: Button, index: int) -> void:
+	if not is_instance_valid(btn):
+		return
+	btn.set_meta("click_e_scale", 1.0)
+	btn.set_meta("click_e_brightness", 1.0)
+	btn.set_meta("click_e_pending", false)
+	_hover_g_apply(float(btn.get_meta("hover_g_progress", 0.0)), btn)
+	_hover_h_apply(float(btn.get_meta("hover_h_progress", 0.0)), btn)
+	var flash: ColorRect = btn.get_meta("click_e_flash", null)
+	if is_instance_valid(flash):
+		flash.color.a = 0.0
+	if index >= 0 and index < games.size() and not _exit_cooldown and not _batch_mode:
+		_select_index(index)
+		_enter_detail(index)
 
 func _on_grid_input(event: InputEvent, index: int, game: Dictionary) -> void:
 	if _exit_cooldown:
@@ -1686,26 +2530,242 @@ func _enter_detail(index: int) -> void:
 	for i in range(_cell_buttons.size()):
 		_stop_cell_animation(i)
 	_hover_index = -1
+	# The E material click feedback (360ms) has already completed before this call.
+	# F: gallery opacity 1 -> 0; detail opacity 0 -> 1, scale 0.97 -> 1.
+	_detail_f_stop()
+	_detail_f_exiting = false
+	# show_game preserves a matching Hero-first sidebar preload or the regular
+	# grid preload, and replaces only media belonging to a different game.
 	_detail_view.show_game(games[index])
 	_detail_view.visible = true
-	# 只隐藏滚动内容，侧边栏和 _grid_root 保持存在
-	_grid_scroll.visible = false
-
-func _exit_detail() -> void:
-	if _detail_view != null:
-		_detail_view.visible = false
+	_detail_view.pivot_offset = _detail_view.size * 0.5
+	_detail_view.scale = Vector2.ONE * DETAIL_F_START_SCALE
+	_detail_view.modulate.a = 0.0
 	_grid_scroll.visible = true
+	_grid_scroll.modulate.a = 1.0
+	_grid_scroll.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# The detail view is on top of the gallery; it must intercept clicks even
+	# while transparent, otherwise the card beneath it can be clicked again.
+	_detail_view.mouse_filter = Control.MOUSE_FILTER_STOP
+	var theme_item_id: String = str(games[index].get("id", "")).strip_edges()
+	if not theme_item_id.is_empty():
+		game_theme_requested.emit(theme_item_id)
+	else:
+		game_theme_cleared.emit()
+	_sidebar_detail_highlight = true
+	_refresh_sidebar_styles()
+	# Keep both surfaces visible during the 500ms crossfade; only hide the
+	# gallery after the animation ends. Sidebar and grid root never move.
+	detail_entered.emit()
+	_detail_f_enter_frame(0.0)
+	_detail_f_tween = create_tween().set_trans(Tween.TRANS_LINEAR)
+	_detail_f_tween.tween_method(_detail_f_enter_frame, 0.0, 1.0, DETAIL_F_DURATION)
+	_detail_f_tween.finished.connect(_detail_f_enter_complete)
+
+func _exit_detail(instant: bool = false) -> void:
+	_sidebar_pending_detail_index = -1
+	_sidebar_pending_detail_id = ""
+	_sidebar_pending_media_key = ""
+	if _detail_view == null:
+		return
+	# Switching sections must always settle immediately, even if an exit is
+	# already in progress. The previous guard left a fading panel visible.
+	if instant:
+		_detail_view.cancel_pending_game_media()
+		_detail_f_stop()
+		game_theme_cleared.emit()
+		_sidebar_detail_highlight = false
+		_refresh_sidebar_styles()
+		_detail_f_exit_complete()
+		return
+	if not _detail_view.visible or _detail_f_exiting:
+		return
+	# Invalidate in-flight media before the view starts leaving, so assets cannot
+	# appear midway through the exit transition.
+	_detail_view.cancel_pending_game_media()
+	# If back is pressed during entry, reverse from the CURRENT opacity,
+	# instead of jumping the panel back to fully opaque.
+	var current_alpha: float = clampf(_detail_view.modulate.a, 0.0, 1.0)
+	_detail_f_stop()
+	_detail_f_exiting = true
+	detail_exited.emit()
+	game_theme_cleared.emit()
+	_sidebar_detail_highlight = false
+	# Drop stale hover state from the detail view's back-button position.
+	for item in _sidebar_items:
+		if is_instance_valid(item):
+			item.set_meta("hovered", false)
+	_refresh_sidebar_styles()
 	_hover_index = -1
 	_refresh_grid_styles()
-	# 鼠标停在原「返回」位置会误触第一行第一张卡片 → 等鼠标松开再解除冷却
+	# Prevent accidental selection of the first card beneath the back button.
 	_exit_cooldown = true
 	_exit_cooldown_t = 0.0
+	_grid_scroll.visible = true
+	_grid_scroll.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_detail_view.mouse_filter = Control.MOUSE_FILTER_STOP
+	# Reverse the F curve from the actual current alpha to zero. Tween a normalized
+	# 0..1 progress and interpolate the captured alpha once; never ease an already
+	# eased opacity value a second time.
+	_detail_f_exit_frame(0.0, current_alpha)
+	if current_alpha <= 0.001:
+		_detail_f_exit_complete()
+		return
+	_detail_f_tween = create_tween().set_trans(Tween.TRANS_LINEAR)
+	_detail_f_tween.tween_method(
+		_detail_f_exit_frame.bind(current_alpha),
+		0.0, 1.0, DETAIL_F_DURATION * current_alpha
+	)
+	_detail_f_tween.finished.connect(_detail_f_exit_complete)
+
+func _detail_f_stop() -> void:
+	if _detail_f_tween != null and _detail_f_tween.is_valid():
+		_detail_f_tween.kill()
+	_detail_f_tween = null
+
+func _detail_f_progress(fraction: float) -> float:
+	# Match the HTML F lab: cubic-bezier(.22, .78, .2, 1).
+	return _hover_css_bezier(clampf(fraction, 0.0, 1.0), 0.22, 0.78, 0.20, 1.0)
+
+func _detail_f_enter_frame(fraction: float) -> void:
+	if not is_instance_valid(_detail_view) or not is_instance_valid(_grid_scroll):
+		return
+	var t: float = _detail_f_progress(fraction)
+	_grid_scroll.modulate.a = 1.0 - t
+	_detail_view.modulate.a = t
+	_detail_view.scale = Vector2.ONE * lerpf(DETAIL_F_START_SCALE, 1.0, t)
+	_detail_view.call("set_transition_alpha", t)
+
+func _detail_f_enter_complete() -> void:
+	_detail_f_tween = null
+	_detail_f_enter_frame(1.0)
+	if not is_instance_valid(_detail_view) or not is_instance_valid(_grid_scroll):
+		return
+	_detail_view.scale = Vector2.ONE
+	_detail_view.modulate.a = 1.0
+	_detail_view.mouse_filter = Control.MOUSE_FILTER_STOP
+	# Media decoding runs concurrently with the F transition and is applied as one
+	# batch; do not append Hero/Logo/screenshots after the transition has finished.
+	_grid_scroll.modulate.a = 0.0
+	_grid_scroll.visible = false
+	_grid_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+
+func _detail_f_exit_frame(fraction: float, start_alpha: float) -> void:
+	if not is_instance_valid(_detail_view) or not is_instance_valid(_grid_scroll):
+		return
+	var t: float = _detail_f_progress(fraction)
+	# Interpolate from the captured visible alpha to zero using one easing pass.
+	var alpha: float = lerpf(clampf(start_alpha, 0.0, 1.0), 0.0, t)
+	_grid_scroll.modulate.a = 1.0 - alpha
+	_detail_view.modulate.a = alpha
+	_detail_view.scale = Vector2.ONE * lerpf(DETAIL_F_START_SCALE, 1.0, alpha)
+	_detail_view.call("set_transition_alpha", alpha)
+
+func _detail_f_exit_complete() -> void:
+	_detail_f_stop()
+	if is_instance_valid(_detail_view):
+		_detail_view.cancel_pending_game_media()
+		_detail_view.call("set_transition_alpha", 1.0)
+		_detail_view.visible = false
+		_detail_view.modulate.a = 1.0
+		_detail_view.scale = Vector2.ONE
+		_detail_view.mouse_filter = Control.MOUSE_FILTER_STOP
+	if is_instance_valid(_grid_scroll):
+		_grid_scroll.visible = true
+		_grid_scroll.modulate.a = 1.0
+		_grid_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	_detail_f_exiting = false
+
+func apply_save_insights(item_id: String, payload: Dictionary) -> void:
+	if _detail_view != null and is_instance_valid(_detail_view):
+		_detail_view.set_save_insights(item_id, payload)
+
+func apply_game_theme_palette(palette: Dictionary) -> void:
+	var colors_value: Variant = palette.get("colors", palette)
+	var colors: Dictionary = colors_value as Dictionary if colors_value is Dictionary else {}
+	var accent: Color = _resolve_game_theme_color(colors, "accent", Color(0.30, 0.48, 0.66))
+	var ambient: Color = _resolve_game_theme_color(colors, "ambient", SIDEBAR_BG)
+	# Keep the base neutral; use a transparent Hero-derived gradient to make hue changes visible.
+	# WB-04：叠加比例较旧版降低，保证叠加后仍能读出"顶部 < 底部 < 中部"的三段色阶。
+	var top_tint: Color = accent.darkened(0.30)
+	top_tint.a = 0.38
+	var bottom_tint: Color = ambient
+	bottom_tint.a = 0.16
+	# The legacy translucent tint over a blue-gray sidebar can turn warm gold
+	# into muddy olive. Keep a repeatable legacy mode for A/B comparison.
+	if OS.get_environment("G3_THEME_COLOR_MODE").to_lower() != "legacy":
+		var warm_surface: Color = ambient.lerp(accent, 0.40)
+		top_tint = Color(warm_surface.r, warm_surface.g, warm_surface.b, 0.86)
+		bottom_tint = Color(ambient.r, ambient.g, ambient.b, 0.65)
+	if OS.get_environment("G3_THEME_DIAG") == "1":
+		print("[G3_THEME_DIAG] sidebar accent=" + accent.to_html() + " ambient=" + ambient.to_html() + " top_tint=" + str(top_tint) + " bottom_tint=" + str(bottom_tint))
+	_transition_sidebar_gradient(top_tint, bottom_tint)
+	# 底部底板现在位于渐变层之下，保持自身底色即可随渐变一起联动，不再淡出为透明。
+	_transition_sidebar_footer(SIDEBAR_FOOTER_BG)
+	# WB-04.1-F：添加按钮光晕已移除，不再有随主题变色的光晕颜色。
+	if _detail_view != null and _detail_view.has_method("apply_game_theme_palette"):
+		_detail_view.apply_game_theme_palette(palette)
+
+func reset_game_theme_palette() -> void:
+	_transition_sidebar_gradient(Color(0.0, 0.0, 0.0, 0.0), Color(0.0, 0.0, 0.0, 0.0))
+	_transition_sidebar_footer(SIDEBAR_FOOTER_BG)
+	if _detail_view != null and _detail_view.has_method("reset_game_theme_palette"):
+		_detail_view.reset_game_theme_palette()
+
+func _transition_sidebar_gradient(target_top: Color, target_bottom: Color) -> void:
+	if _sidebar_theme_material == null or not is_instance_valid(_sidebar_theme_material):
+		return
+	if _sidebar_gradient_tween != null and _sidebar_gradient_tween.is_valid():
+		_sidebar_gradient_tween.kill()
+	var start_top: Color = _sidebar_theme_material.get_shader_parameter("top_color")
+	var start_bottom: Color = _sidebar_theme_material.get_shader_parameter("bottom_color")
+	_sidebar_gradient_tween = create_tween().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_sidebar_gradient_tween.tween_method(Callable(self, "_set_sidebar_gradient_progress").bind(start_top, start_bottom, target_top, target_bottom), 0.0, 1.0, 0.68)
+
+func _set_sidebar_gradient_progress(progress: float, start_top: Color, start_bottom: Color, target_top: Color, target_bottom: Color) -> void:
+	if _sidebar_theme_material == null or not is_instance_valid(_sidebar_theme_material):
+		return
+	_sidebar_theme_material.set_shader_parameter("top_color", start_top.lerp(target_top, progress))
+	_sidebar_theme_material.set_shader_parameter("bottom_color", start_bottom.lerp(target_bottom, progress))
+	# 每步都把"侧边栏顶部实际合成色"广播出去，窗口菜单栏据此同步（含过渡过程）。
+	_emit_sidebar_surface_color()
+
+func _emit_sidebar_surface_color() -> void:
+	# 侧边栏顶部 = 底色与渐变层顶色按 alpha 合成，和菜单栏共边时用同一个结果。
+	var surface: Color = SIDEBAR_BG
+	if _sidebar_theme_material != null and is_instance_valid(_sidebar_theme_material):
+		var value: Variant = _sidebar_theme_material.get_shader_parameter("top_color")
+		if value is Color:
+			var tint: Color = value
+			surface = SIDEBAR_BG.lerp(Color(tint.r, tint.g, tint.b, 1.0), clampf(tint.a, 0.0, 1.0))
+	# 页脚直接使用菜单栏收到的同一合成色，不参与中部文字列表的 top→bottom 渐变。
+	if _sidebar_footer_theme_overlay != null and is_instance_valid(_sidebar_footer_theme_overlay):
+		_sidebar_footer_theme_overlay.color = surface
+	sidebar_surface_color_changed.emit(surface)
+
+func _transition_sidebar_footer(target: Color) -> void:
+	if _sidebar_footer_bg == null or not is_instance_valid(_sidebar_footer_bg):
+		return
+	if _sidebar_footer_theme_tween != null and _sidebar_footer_theme_tween.is_valid():
+		_sidebar_footer_theme_tween.kill()
+	_sidebar_footer_theme_tween = create_tween().set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	_sidebar_footer_theme_tween.tween_property(_sidebar_footer_bg, "color", target, 0.68)
+
+func _resolve_game_theme_color(colors: Dictionary, key: String, fallback: Color) -> Color:
+	var value: String = str(colors.get(key, "")).strip_edges()
+	if value.is_empty():
+		return fallback
+	return Color.from_string(value, fallback)
 
 func _on_detail_back() -> void:
 	_exit_detail()
 
 func is_detail_open() -> bool:
 	return _detail_view != null and _detail_view.visible
+
+func show_detail_launch_failure() -> void:
+	if _detail_view != null and _detail_view.visible and _detail_view.has_method("show_launch_failure"):
+		_detail_view.show_launch_failure()
 
 func set_detail_launching(launching: bool) -> void:
 	if _detail_view != null:
@@ -1722,14 +2782,20 @@ func _play_cell_animation(index: int) -> void:
 	var btn: Button = _cell_buttons[index]
 	if not is_instance_valid(btn):
 		return
-	if not btn.has_meta("anim_path"):
-		return
 	if not btn.has_meta("anim_holder"):
 		return
 	var holder: Control = btn.get_meta("anim_holder") as Control
 	if holder == null or not is_instance_valid(holder):
 		return
-	var path: String = str(btn.get_meta("anim_path"))
+	var path: String = str(btn.get_meta("anim_path", ""))
+	if path.is_empty():
+		path = str(btn.get_meta("cover_path", ""))
+		if path.is_empty():
+			return
+		_check_animated(path, btn)
+		path = str(btn.get_meta("anim_path", ""))
+		if path.is_empty():
+			return
 	if not ClassDB.class_exists(&"AnimatedImagePlayer"):
 		return
 	var anim_tex = _get_animated_texture(path)
@@ -1750,7 +2816,11 @@ func _play_cell_animation(index: int) -> void:
 		holder.set_meta("player", player)
 	if player.get("animated_image") != anim_tex:
 		player.set("animated_image", anim_tex)
-	player.set("playing", true)
+	# 插件文档使用 play() 启动；保留属性回退以兼容旧版扩展。
+	if player.has_method("play"):
+		player.call("play")
+	else:
+		player.set("playing", true)
 	holder.visible = true
 
 func _stop_cell_animation(index: int) -> void:
@@ -1767,7 +2837,10 @@ func _stop_cell_animation(index: int) -> void:
 	if holder.has_meta("player"):
 		var player: Control = holder.get_meta("player") as Control
 		if player != null and is_instance_valid(player):
-			player.set("playing", false)
+			if player.has_method("stop"):
+				player.call("stop")
+			else:
+				player.set("playing", false)
 	holder.visible = false
 
 func _get_animated_texture(path: String):
@@ -1782,10 +2855,39 @@ func _get_animated_texture(path: String):
 
 func _load_animated_poster(path: String) -> Texture2D:
 	if ClassDB.class_exists(&"AnimatedImageLoader"):
-		return ClassDB.class_call_static(&"AnimatedImageLoader", &"load_poster_from_file", path) as Texture2D
-	# Godot can still decode a static WebP without the optional native plugin.
+		var poster = ClassDB.class_call_static(&"AnimatedImageLoader", &"load_poster_from_file", path) as Texture2D
+		if poster != null:
+			return poster
+		var animated = ClassDB.class_call_static(&"AnimatedImageLoader", &"load_from_file", path)
+		if animated != null:
+			if animated.has_method("set_frame"):
+				animated.call("set_frame", 0)
+			if animated.has_method("get_frame_texture"):
+				var first_frame = animated.call("get_frame_texture", 0) as Texture2D
+				if first_frame != null:
+					return first_frame
+			if animated.has_method("get_poster_texture"):
+				var fallback_poster = animated.call("get_poster_texture") as Texture2D
+				if fallback_poster != null:
+					return fallback_poster
+
+	# 与藏品室一致：直接走 WebP buffer API 兜底，彻底避开 Image.load(path) 触发底层报错
+	if path.get_extension().to_lower() == "webp":
+		var file := FileAccess.open(path, FileAccess.READ)
+		if file != null:
+			var bytes: PackedByteArray = file.get_buffer(file.get_length())
+			file.close()
+			if not bytes.is_empty():
+				var image := Image.new()
+				if image.load_webp_from_buffer(bytes) == OK and not image.is_empty():
+					image.generate_mipmaps()
+					return ImageTexture.create_from_image(image)
+		return null
+
+	# 非 WebP 格式走常规加载
 	var image := Image.new()
-	if image.load(path) != OK or image.is_empty():
+	var error: Error = image.load(path)
+	if error != OK or image.is_empty():
 		return null
 	image.generate_mipmaps()
 	return ImageTexture.create_from_image(image)
@@ -1855,12 +2957,21 @@ func set_section_visible(v: bool) -> void:
 		_ui_layer.visible = v
 	if not v and _detail_view != null:
 		# 切出游戏板块时，把详情页也收掉，避免下次切回来还在详情页
-		_exit_detail()
-	# 从隐藏切回可见 → 卡片弹入（切板块时能看到"弹"的效果）
-	if v and not was_visible:
+		_exit_detail(true)
+	# 切出板块时不保留 hover 缩放（鼠标没移出也会被隐藏，mouse_exited 不一定触发）
+	if not v and _add_btn != null:
+		_add_btn_hovered = false
+		if _add_scale_tween != null and _add_scale_tween.is_valid():
+			_add_scale_tween.kill()
+		_add_btn.scale = Vector2.ONE
+	# Do not jiggle an unplayed first wall while its CRT covers are pending.
+	if v and not was_visible and not _initial_wall_reveal_pending:
 		_pop_cards_in()
 
 func _pop_cards_in() -> void:
+	# Do not inject random spring offsets while cover loading/reveals own the layout.
+	if not _card_springs_enabled:
+		return
 	# 给每张卡片一个随机初始偏移 + 速度，弹簧会把它们"弹"到位
 	for i in range(_cell_buttons.size()):
 		var b: Button = _cell_buttons[i]
@@ -1884,10 +2995,44 @@ func jump_to_index(index: int) -> void:
 		return
 	_select_index(clampi(index, 0, games.size() - 1))
 
+## Read-only sample bridge for the COMICS CRT lab. Only already-decoded real
+## game-card textures are returned; the lab never creates synthetic cover art
+## or starts a second image-decoding pipeline.
+func get_animation_lab_samples(max_count: int = 6) -> Array[Dictionary]:
+	var samples: Array[Dictionary] = []
+	var limit: int = maxi(0, max_count)
+	if limit == 0:
+		return samples
+	var count: int = mini(games.size(), _cell_buttons.size())
+	for index in range(count):
+		var game: Dictionary = games[index]
+		var btn: Button = _cell_buttons[index]
+		if not is_instance_valid(btn):
+			continue
+		var cover_rect: TextureRect = btn.get_meta("cover_rect", null)
+		if not is_instance_valid(cover_rect) or cover_rect.texture == null:
+			continue
+		var title: String = str(game.get("title", "")).strip_edges()
+		if title.is_empty():
+			title = "未命名游戏"
+		samples.append({
+			"id": str(game.get("id", index)),
+			"title": title,
+			"platform": str(game.get("platform", "")),
+			"texture": cover_rect.texture,
+		})
+		if samples.size() >= limit:
+			break
+	return samples
+
+
 func get_selected_game() -> Dictionary:
 	if selected_index < 0 or selected_index >= games.size():
 		return {}
 	return games[selected_index]
+
+func is_batch_mode() -> bool:
+	return _batch_mode
 
 func toggle_batch_mode(enabled: bool) -> void:
 	_batch_mode = enabled
@@ -1971,20 +3116,289 @@ func _on_sidebar_scroll_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 
 func _load_cover_async(cover_rect: TextureRect, path: String, btn: Button) -> void:
-	# 使用 WorkerThreadPool 在后台读文件，防止卡死主线程
-	WorkerThreadPool.add_task(_load_cover_task.bind(cover_rect, path, btn))
+	# The grid is built in display order, so FIFO starts with the earliest cards.
+	# A bounded worker count prevents all covers from competing for disk/CPU at once.
+	btn.set_meta("perf_cover_generation", _perf_grid_generation)
+	btn.set_meta("cover_load_pending", true)
+	_perf_grid_async_queued += 1
+	_perf_grid_async_pending += 1
+	_cover_load_queue.append({
+		"cover_rect": cover_rect,
+		"path": path,
+		"btn": btn,
+		"generation": _perf_grid_generation,
+		"queued_usec": Time.get_ticks_usec(),
+	})
+	_pump_cover_load_queue()
 
-func _load_cover_task(cover_rect: TextureRect, path: String, btn: Button) -> void:
+func _pump_cover_load_queue() -> void:
+	if _cover_queue_batching:
+		return
+	while _active_cover_loads < MAX_CONCURRENT_COVER_LOADS and not _cover_load_queue.is_empty():
+		var item: Dictionary = _cover_load_queue.pop_front()
+		var cover_rect: TextureRect = item.get("cover_rect")
+		var btn: Button = item.get("btn")
+		var generation: int = int(item.get("generation", -1))
+		if not is_instance_valid(cover_rect) or not is_instance_valid(btn):
+			continue
+		if generation != _perf_grid_generation:
+			continue
+		var queue_wait_ms: float = float(Time.get_ticks_usec() - int(item.get("queued_usec", Time.get_ticks_usec()))) / 1000.0
+		_active_cover_loads += 1
+		_perf_cover_peak_active = maxi(_perf_cover_peak_active, _active_cover_loads)
+		WorkerThreadPool.add_task(_load_cover_task.bind(cover_rect, str(item.get("path", "")), btn, queue_wait_ms))
+
+func _on_cover_scroll_value_changed(_value: float) -> void:
+	if _cover_queue_batching:
+		return
+	_crt_schedule_visible_covers()
+	_prioritize_cover_load_queue()
+	_pump_cover_load_queue()
+
+# Match the single-card HTML shell translateY curve. The image and child
+# effects must move together; changing shader vertices alone cannot move
+# CanvasItem children that live in the original slot.
+func _crt_single_cover_offset(ms: float) -> float:
+	var progress: float = clampf((ms - 290.0) / 140.0, 0.0, 1.0)
+	var eased: float = 1.0 - pow(1.0 - progress, 3.0)
+	return 10.0 * (1.0 - eased)
+
+func _crt_hide_card_shell(btn: Button) -> void:
+	# v6: hide the entire legacy Button, including its background, borders,
+	# focus state, shadow and child decorations. CRT imagery is rendered by a
+	# separate TextureRect sibling of the Button, so it remains visible.
+	if not is_instance_valid(btn):
+		return
+	btn.visible = false
+	btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+func _crt_restore_card_shell(btn: Button) -> void:
+	if not is_instance_valid(btn):
+		return
+	# Once the CRT layer is fully gone the normal card can take over.
+	btn.visible = true
+	btn.flat = false
+
+func _crt_schedule_visible_covers() -> void:
+	# The backend may load images concurrently; visual starts are ordered by
+	# their current row-major grid index and never expose a placeholder card.
+	if _initial_wall_reveal_held or not visible:
+		return
+	if _cover_queue_batching or _cell_buttons.is_empty() or _crt_boot_generation != _perf_grid_generation:
+		return
+	var now: int = Time.get_ticks_usec()
+	if _crt_next_start_usec > now:
+		return
+	var viewport_ok: bool = _grid_scroll != null and is_instance_valid(_grid_scroll)
+	var viewport_rect: Rect2 = Rect2()
+	if viewport_ok:
+		viewport_rect = _grid_scroll.get_global_rect()
+		viewport_ok = viewport_rect.size.x > 0.0 and viewport_rect.size.y > 0.0
+	for btn in _cell_buttons:
+		if not is_instance_valid(btn) or bool(btn.get_meta("crt_started", false)):
+			continue
+		var wrapper: Control = btn.get_meta("wrapper", null)
+		var cover_rect: TextureRect = btn.get_meta("cover_rect", null)
+		if not is_instance_valid(wrapper) or not is_instance_valid(cover_rect):
+			continue
+		if viewport_ok and not wrapper.get_global_rect().intersects(viewport_rect):
+			if bool(btn.get_meta("cover_loaded", false)):
+				_crt_show_final(btn)
+			continue
+		if not bool(btn.get_meta("cover_loaded", false)) or cover_rect.texture == null:
+			# Respect row-major order briefly while a genuine cover is decoding.
+			# A missing/failed cover must not stall the rest of the wall.
+			if bool(btn.get_meta("cover_load_pending", false)):
+				if _initial_wall_order_wait_usec == 0:
+					_initial_wall_order_wait_usec = now
+				if now - _initial_wall_order_wait_usec < INITIAL_WALL_ORDER_WAIT_USEC:
+					return
+			continue
+		var crt_proxy: TextureRect = btn.get_meta("crt_proxy", null)
+		if not is_instance_valid(crt_proxy):
+			_crt_show_final(btn)
+			continue
+		var mat: ShaderMaterial = crt_proxy.material as ShaderMaterial
+		if mat == null:
+			_crt_show_final(btn)
+			continue
+		btn.set_meta("crt_started", true)
+		if _initial_wall_reveal_pending:
+			_initial_wall_reveal_pending = false
+			if OS.get_environment("G3_BOOT_DIAG") == "1":
+				print("[G3_BOOT] FIRST_CARD_CRT_STARTED " + str(Time.get_ticks_msec()))
+		_crt_hide_card_shell(btn)
+		# Only a fully decoded genuine cover enters the independent CRT layer.
+		crt_proxy.texture = cover_rect.texture
+		crt_proxy.position = wrapper.position + Vector2(0.0, _crt_single_cover_offset(0.0))
+		crt_proxy.size = btn.size
+		var cover_size: Vector2 = crt_proxy.size
+		if cover_size.x < 1.0 or cover_size.y < 1.0:
+			cover_size = Vector2(maxf(1.0, wrapper.size.x), maxf(1.0, wrapper.size.y - SHADOW_H_BASE * _ui_scale))
+		mat.set_shader_parameter("card_size", cover_size)
+		mat.set_shader_parameter("crt_ms", 0.0)
+		var halo: ColorRect = btn.get_meta("crt_halo", null)
+		if is_instance_valid(halo):
+			var hm: ShaderMaterial = halo.material as ShaderMaterial
+			if hm != null:
+				hm.set_shader_parameter("poster_size", cover_size)
+				hm.set_shader_parameter("crt_ms", 0.0)
+			# v14: restore a soft synchronized outer glow, but keep it fully
+			# gated by the halo shader so no placeholder/container appears.
+			halo.visible = true
+		# Crucial v7 invariant: wrapper alpha remains ZERO throughout CRT.
+		# This is the original terminal animation's whole-card visibility gate.
+		crt_proxy.visible = true
+		_crt_active_cards.append({"btn": weakref(btn), "generation": _perf_grid_generation, "elapsed": 0.0})
+		# Fixed gap between actual starts, even if texture decode was delayed.
+		_crt_next_start_usec = now + CRT_CARD_GAP_USEC
+		break
+
+func _crt_advance_active(delta: float) -> void:
+	if _crt_active_cards.is_empty():
+		return
+	# No tween and no wrapper.position mutations: sorting/hover springs are
+	# independent. All phases are driven by absolute per-card milliseconds.
+	for n in range(_crt_active_cards.size() - 1, -1, -1):
+		var state: Dictionary = _crt_active_cards[n]
+		if int(state.get("generation", -1)) != _perf_grid_generation:
+			_crt_active_cards.remove_at(n)
+			continue
+		var weak: WeakRef = state.get("btn") as WeakRef
+		var btn: Button = null
+		if weak != null:
+			btn = weak.get_ref() as Button
+		if not is_instance_valid(btn):
+			_crt_active_cards.remove_at(n)
+			continue
+		var crt_proxy: TextureRect = btn.get_meta("crt_proxy", null)
+		if not is_instance_valid(crt_proxy):
+			_crt_active_cards.remove_at(n)
+			continue
+		var mat: ShaderMaterial = crt_proxy.material as ShaderMaterial
+		if mat == null:
+			_crt_active_cards.remove_at(n)
+			continue
+		# Sorting/nav displacement or viewport relayout must not detach the
+		# temporary CRT picture from its target card's grid coordinate.
+		var wrapper: Control = btn.get_meta("wrapper", null)
+		var ms: float = minf(CRT_CARD_DURATION_MS, float(state.get("elapsed", 0.0)) + delta * 1000.0)
+		state["elapsed"] = ms
+		# Shader and shell offset both consume the same normalized HTML clock.
+		# This keeps the accepted v12 shape/reveal/return exactly in sync.
+		var html_ms: float = ms * (CRT_CARD_HTML_DURATION_MS / CRT_CARD_DURATION_MS)
+		if is_instance_valid(wrapper):
+			crt_proxy.position = wrapper.position + Vector2(0.0, _crt_single_cover_offset(html_ms))
+			crt_proxy.size = btn.size
+		# No Button background during the time-stretched HTML signal.
+		# Only actual cover/beam pixels may be visible.
+		mat.set_shader_parameter("crt_ms", html_ms)
+		var halo: ColorRect = btn.get_meta("crt_halo", null)
+		if is_instance_valid(halo):
+			var hm: ShaderMaterial = halo.material as ShaderMaterial
+			if hm != null:
+				hm.set_shader_parameter("crt_ms", html_ms)
+		if ms >= CRT_CARD_DURATION_MS:
+			_crt_show_final(btn)
+			_crt_active_cards.remove_at(n)
+		else:
+			_crt_active_cards[n] = state
+
+func _crt_show_final(btn: Button) -> void:
+	if not is_instance_valid(btn):
+		return
+	# Never reveal an empty/failed cover as a grey placeholder.
+	if not bool(btn.get_meta("cover_loaded", false)):
+		return
+	var cover_test: TextureRect = btn.get_meta("cover_rect", null)
+	if not is_instance_valid(cover_test) or cover_test.texture == null:
+		return
+	# Atomically switch from CRT-only pixels to the normal card. Never allow
+	# the two layers to overlap or show a placeholder between frames.
+	var crt_proxy: TextureRect = btn.get_meta("crt_proxy", null)
+	if is_instance_valid(crt_proxy):
+		crt_proxy.visible = false
+		crt_proxy.texture = null
+	_crt_restore_card_shell(btn)
+	btn.mouse_filter = Control.MOUSE_FILTER_STOP
+	btn.set_meta("crt_started", true)
+	var wrapper: Control = btn.get_meta("wrapper", null)
+	if is_instance_valid(wrapper):
+		wrapper.modulate.a = 1.0
+	var cover_rect: TextureRect = btn.get_meta("cover_rect", null)
+	if is_instance_valid(cover_rect):
+		var mat: ShaderMaterial = cover_rect.material as ShaderMaterial
+		if mat != null:
+			mat.set_shader_parameter("crt_ms", -1.0)
+	var halo: ColorRect = btn.get_meta("crt_halo", null)
+	if is_instance_valid(halo):
+		halo.visible = false
+	# Restore the button's own visuals only AFTER a real texture is assigned
+	# and the six-stage CRT reveal has switched to its final frame.
+	# Unloaded / failed slots never reach this line, so no empty shell appears.
+	btn.self_modulate.a = 1.0
+
+func _crt_show_cached_on_rebuild() -> void:
+	# Only the very first wall build is a cold boot. On subsequent rebuilds
+	# already-cached covers are already familiar; sorting stays spring-only.
+	for btn in _cell_buttons:
+		if is_instance_valid(btn) and bool(btn.get_meta("cover_loaded", false)):
+			_crt_show_final(btn)
+
+func _prioritize_cover_load_queue() -> void:
+	if _cover_load_queue.is_empty() or _grid_scroll == null or not is_instance_valid(_grid_scroll):
+		return
+	var viewport_rect: Rect2 = _grid_scroll.get_global_rect()
+	if viewport_rect.size.x <= 0.0 or viewport_rect.size.y <= 0.0:
+		return
+	var preload_rect: Rect2 = viewport_rect.grow_individual(0.0, viewport_rect.size.y, 0.0, viewport_rect.size.y)
+	var visible_items: Array[Dictionary] = []
+	var nearby_items: Array[Dictionary] = []
+	var background_items: Array[Dictionary] = []
+	for item in _cover_load_queue:
+		var btn: Button = item.get("btn")
+		if not is_instance_valid(btn):
+			continue
+		if int(item.get("generation", -1)) != _perf_grid_generation:
+			continue
+		var wrapper: Control = btn.get_meta("wrapper", null)
+		if not is_instance_valid(wrapper):
+			continue
+		var card_rect: Rect2 = wrapper.get_global_rect()
+		if card_rect.intersects(viewport_rect):
+			visible_items.append(item)
+		elif card_rect.intersects(preload_rect):
+			nearby_items.append(item)
+		else:
+			background_items.append(item)
+	_cover_load_queue.clear()
+	_cover_load_queue.append_array(visible_items)
+	_cover_load_queue.append_array(nearby_items)
+	_cover_load_queue.append_array(background_items)
+
+func _load_cover_task(cover_rect: TextureRect, path: String, btn: Button, queue_wait_ms: float) -> void:
+	var read_started_usec: int = Time.get_ticks_usec()
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
+		call_deferred("_perf_cover_finish_with_metrics", btn, false, queue_wait_ms, float(Time.get_ticks_usec() - read_started_usec) / 1000.0, 0.0, 0.0)
 		return
 	var bytes := f.get_buffer(f.get_length())
 	f.close()
+	var file_read_ms: float = float(Time.get_ticks_usec() - read_started_usec) / 1000.0
 	if bytes.size() < 8:
+		call_deferred("_perf_cover_finish_with_metrics", btn, false, queue_wait_ms, file_read_ms, 0.0, 0.0)
 		return
 		
 	var img := Image.new()
 	var is_std_format := false
+	var decode_started_usec: int = Time.get_ticks_usec()
+	var image_decode_ms: float = 0.0
+	var resize_ms: float = 0.0
+	var mipmap_ms: float = 0.0
+	var source_width: int = 0
+	var source_height: int = 0
+	var output_width: int = 0
+	var output_height: int = 0
 	
 	# 线程内只处理标准格式的解码（安全且快）
 	if bytes[0] == 0x89 and bytes[1] == 0x50 and bytes[2] == 0x4E and bytes[3] == 0x47:
@@ -1996,36 +3410,258 @@ func _load_cover_task(cover_rect: TextureRect, path: String, btn: Button) -> voi
 	elif bytes[0] == 0x42 and bytes[1] == 0x4D:
 		if img.load_bmp_from_buffer(bytes) == OK:
 			is_std_format = true
+	elif bytes[0] == 0x52 and bytes[1] == 0x49 and bytes[2] == 0x46 and bytes[3] == 0x46 \
+			and bytes.size() >= 12 \
+			and bytes[8] == 0x57 and bytes[9] == 0x45 and bytes[10] == 0x42 and bytes[11] == 0x50:
+		pass # WebP 交给主线程处理，避免在 WorkerThreadPool 尝试解析动态 WebP 导致底层报错
 			
 	if is_std_format:
+		image_decode_ms = float(Time.get_ticks_usec() - decode_started_usec) / 1000.0
+		source_width = img.get_width()
+		source_height = img.get_height()
+		# Measure resize independently from codec decode and mipmap generation.
+		var resize_started_usec: int = Time.get_ticks_usec()
+		var longest_edge: int = maxi(source_width, source_height)
+		if longest_edge > MAX_COVER_TEXTURE_EDGE:
+			var resize_scale: float = float(MAX_COVER_TEXTURE_EDGE) / float(longest_edge)
+			var resized_width: int = maxi(1, roundi(float(source_width) * resize_scale))
+			var resized_height: int = maxi(1, roundi(float(source_height) * resize_scale))
+			img.resize(resized_width, resized_height, Image.INTERPOLATE_LANCZOS)
+		resize_ms = float(Time.get_ticks_usec() - resize_started_usec) / 1000.0
+		output_width = img.get_width()
+		output_height = img.get_height()
+		var mipmap_started_usec: int = Time.get_ticks_usec()
 		img.generate_mipmaps()
-		call_deferred("_apply_cover_texture", cover_rect, img, path, btn)
+		mipmap_ms = float(Time.get_ticks_usec() - mipmap_started_usec) / 1000.0
+		# Preserve the historical decode_ms meaning: total worker-side image preparation.
+		var decode_ms: float = float(Time.get_ticks_usec() - decode_started_usec) / 1000.0
+		call_deferred("_enqueue_cover_texture_apply", cover_rect, img, path, btn, queue_wait_ms, file_read_ms, decode_ms, image_decode_ms, resize_ms, mipmap_ms, source_width, source_height, output_width, output_height)
 	else:
-		# WebP 或动图，回主线程交给插件处理
-		call_deferred("_apply_cover_texture_plugin", cover_rect, path, btn)
+		# WebP/animated formats use the existing plugin path, but their main-thread application is queued too.
+		call_deferred("_enqueue_cover_plugin_apply", cover_rect, path, btn, queue_wait_ms, file_read_ms, 0.0)
 
-func _apply_cover_texture(cover_rect: TextureRect, img: Image, path: String, btn: Button) -> void:
+func _enqueue_cover_texture_apply(cover_rect: TextureRect, img: Image, path: String, btn: Button, queue_wait_ms: float, file_read_ms: float, decode_ms: float, image_decode_ms: float, resize_ms: float, mipmap_ms: float, source_width: int, source_height: int, output_width: int, output_height: int) -> void:
+	_cover_apply_queue.append({
+		"kind": "image",
+		"cover_rect": cover_rect,
+		"image": img,
+		"path": path,
+		"btn": btn,
+		"queue_wait_ms": queue_wait_ms,
+		"file_read_ms": file_read_ms,
+		"decode_ms": decode_ms,
+		"image_decode_ms": image_decode_ms,
+		"resize_ms": resize_ms,
+		"mipmap_ms": mipmap_ms,
+		"source_width": source_width,
+		"source_height": source_height,
+		"output_width": output_width,
+		"output_height": output_height,
+		"generation": int(btn.get_meta("perf_cover_generation", -1)) if is_instance_valid(btn) else -1,
+		"queued_usec": Time.get_ticks_usec(),
+	})
+	_perf_cover_apply_queue_peak = maxi(_perf_cover_apply_queue_peak, _cover_apply_queue.size())
+
+func _enqueue_cover_plugin_apply(cover_rect: TextureRect, path: String, btn: Button, queue_wait_ms: float, file_read_ms: float, decode_ms: float) -> void:
+	_cover_apply_queue.append({
+		"kind": "plugin",
+		"cover_rect": cover_rect,
+		"path": path,
+		"btn": btn,
+		"queue_wait_ms": queue_wait_ms,
+		"file_read_ms": file_read_ms,
+		"decode_ms": decode_ms,
+		"generation": int(btn.get_meta("perf_cover_generation", -1)) if is_instance_valid(btn) else -1,
+		"queued_usec": Time.get_ticks_usec(),
+	})
+	_perf_cover_apply_queue_peak = maxi(_perf_cover_apply_queue_peak, _cover_apply_queue.size())
+
+func _drain_cover_apply_queue() -> void:
+	# At most one texture is created/applied per rendered frame. Worker decode stays parallel.
+	for _apply_index in range(MAX_COVER_TEXTURE_APPLIES_PER_FRAME):
+		if _cover_apply_queue.is_empty():
+			return
+		var item: Dictionary = _cover_apply_queue.pop_front()
+		var kind: String = str(item.get("kind", "image"))
+		var cover_rect: TextureRect = item.get("cover_rect")
+		var path: String = str(item.get("path", ""))
+		var btn: Button = item.get("btn")
+		var queue_wait_ms: float = float(item.get("queue_wait_ms", 0.0))
+		var file_read_ms: float = float(item.get("file_read_ms", 0.0))
+		var decode_ms: float = float(item.get("decode_ms", 0.0))
+		var image_decode_ms: float = float(item.get("image_decode_ms", 0.0))
+		var resize_ms: float = float(item.get("resize_ms", 0.0))
+		var mipmap_ms: float = float(item.get("mipmap_ms", 0.0))
+		var source_width: int = int(item.get("source_width", 0))
+		var source_height: int = int(item.get("source_height", 0))
+		var output_width: int = int(item.get("output_width", 0))
+		var output_height: int = int(item.get("output_height", 0))
+		var item_generation: int = int(item.get("generation", -1))
+		if item_generation != _perf_grid_generation or not is_instance_valid(cover_rect) or not is_instance_valid(btn):
+			_perf_cover_finish_with_metrics(btn, false, queue_wait_ms, file_read_ms, decode_ms, 0.0)
+			continue
+		var apply_queue_wait_ms: float = float(Time.get_ticks_usec() - int(item.get("queued_usec", Time.get_ticks_usec()))) / 1000.0
+		_perf_cover_apply_queue_wait_total_ms += apply_queue_wait_ms
+		_perf_cover_apply_queue_wait_max_ms = maxf(_perf_cover_apply_queue_wait_max_ms, apply_queue_wait_ms)
+		if kind == "plugin":
+			_apply_cover_texture_plugin(cover_rect, path, btn, queue_wait_ms, file_read_ms, decode_ms)
+		else:
+			var img: Image = item.get("image")
+			_apply_cover_texture(cover_rect, img, path, btn, queue_wait_ms, file_read_ms, decode_ms, image_decode_ms, resize_ms, mipmap_ms, source_width, source_height, output_width, output_height)
+
+func _apply_cover_texture(cover_rect: TextureRect, img: Image, path: String, btn: Button, queue_wait_ms: float, file_read_ms: float, decode_ms: float, image_decode_ms: float, resize_ms: float, mipmap_ms: float, source_width: int, source_height: int, output_width: int, output_height: int) -> void:
 	if not is_instance_valid(cover_rect):
+		_perf_cover_finish_with_metrics(btn, false, queue_wait_ms, file_read_ms, decode_ms, 0.0)
 		return
+	var apply_started_usec: int = Time.get_ticks_usec()
+	var texture_create_started_usec: int = Time.get_ticks_usec()
 	var tex: Texture2D = ImageTexture.create_from_image(img)
+	var texture_create_ms: float = float(Time.get_ticks_usec() - texture_create_started_usec) / 1000.0
 	_cover_texture_cache[path] = tex  # 写入缓存
+	var texture_assign_started_usec: int = Time.get_ticks_usec()
 	cover_rect.texture = tex
-	_check_animated(path, btn)
+	var texture_assign_ms: float = float(Time.get_ticks_usec() - texture_assign_started_usec) / 1000.0
+	btn.set_meta("cover_loaded", true)
+	lab_cover_samples_changed.emit()
+	if _crt_boot_generation != _perf_grid_generation:
+		_crt_show_final(btn)
+	var apply_ms: float = float(Time.get_ticks_usec() - apply_started_usec) / 1000.0
+	_perf_cover_finish_with_metrics(btn, true, queue_wait_ms, file_read_ms, decode_ms, apply_ms, image_decode_ms, resize_ms, mipmap_ms, source_width, source_height, output_width, output_height, texture_create_ms, texture_assign_ms, 0.0, 0.0)
 
-func _apply_cover_texture_plugin(cover_rect: TextureRect, path: String, btn: Button) -> void:
-	if not is_instance_valid(cover_rect):
+func _apply_cover_texture_plugin(cover_rect: TextureRect, path: String, btn: Button, queue_wait_ms: float, file_read_ms: float, decode_ms: float) -> void:
+	if not is_instance_valid(cover_rect) or not is_instance_valid(btn):
+		_perf_cover_finish_with_metrics(btn, false, queue_wait_ms, file_read_ms, decode_ms, 0.0)
 		return
+	var plugin_load_started_usec: int = Time.get_ticks_usec()
+	if ClassDB.class_exists(&"AnimatedImageLoader") and ClassDB.class_has_method(&"AnimatedImageLoader", &"load_from_file_async"):
+		var callback: Callable = _on_cover_plugin_loaded.bind(cover_rect, path, btn, queue_wait_ms, file_read_ms, decode_ms, plugin_load_started_usec)
+		ClassDB.class_call_static(&"AnimatedImageLoader", &"load_from_file_async", path, callback)
+		return
+	# Compatibility fallback for older extension builds without the asynchronous API.
 	var tex: Texture2D = _load_animated_poster(path)
-	if tex != null:
-		_cover_texture_cache[path] = tex # 写入缓存
-		cover_rect.texture = tex
-	_check_animated(path, btn)
+	var plugin_load_elapsed_ms: float = float(Time.get_ticks_usec() - plugin_load_started_usec) / 1000.0
+	_finish_cover_plugin_apply(tex, cover_rect, path, btn, queue_wait_ms, file_read_ms, decode_ms, plugin_load_elapsed_ms, plugin_load_elapsed_ms)
+
+func _on_cover_plugin_loaded(loaded_resource: Variant, cover_rect: TextureRect, path: String, btn: Button, queue_wait_ms: float, file_read_ms: float, decode_ms: float, plugin_load_started_usec: int) -> void:
+	var plugin_load_elapsed_ms: float = float(Time.get_ticks_usec() - plugin_load_started_usec) / 1000.0
+	if not is_instance_valid(cover_rect) or not is_instance_valid(btn) or int(btn.get_meta("perf_cover_generation", -1)) != _perf_grid_generation:
+		_perf_cover_finish_with_metrics(btn, false, queue_wait_ms, file_read_ms, decode_ms, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, plugin_load_elapsed_ms)
+		return
+	var tex: Texture2D = _extract_cover_poster_texture(loaded_resource)
+	var sync_fallback_ms: float = 0.0
+	if tex == null:
+		# Rare compatibility fallback if async decoding cannot produce a poster.
+		var fallback_started_usec: int = Time.get_ticks_usec()
+		tex = _load_animated_poster(path)
+		sync_fallback_ms = float(Time.get_ticks_usec() - fallback_started_usec) / 1000.0
+		plugin_load_elapsed_ms = float(Time.get_ticks_usec() - plugin_load_started_usec) / 1000.0
+	_finish_cover_plugin_apply(tex, cover_rect, path, btn, queue_wait_ms, file_read_ms, decode_ms, plugin_load_elapsed_ms, sync_fallback_ms)
+
+func _extract_cover_poster_texture(loaded_resource: Variant) -> Texture2D:
+	if loaded_resource == null or not (loaded_resource is Object):
+		return null
+	var loaded_object: Object = loaded_resource
+	if loaded_object.has_method("get_poster_texture"):
+		var poster: Texture2D = loaded_object.call("get_poster_texture") as Texture2D
+		if poster != null:
+			return poster
+	if loaded_object.has_method("get_frame_texture"):
+		var first_frame: Texture2D = loaded_object.call("get_frame_texture", 0) as Texture2D
+		if first_frame != null:
+			return first_frame
+	return loaded_resource as Texture2D
+
+func _finish_cover_plugin_apply(tex: Texture2D, cover_rect: TextureRect, path: String, btn: Button, queue_wait_ms: float, file_read_ms: float, decode_ms: float, plugin_load_elapsed_ms: float, sync_fallback_ms: float = 0.0) -> void:
+	if not is_instance_valid(cover_rect) or not is_instance_valid(btn):
+		_perf_cover_finish_with_metrics(btn, false, queue_wait_ms, file_read_ms, decode_ms, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, plugin_load_elapsed_ms)
+		return
+	var apply_started_usec: int = Time.get_ticks_usec()
+	var perf_cover_loaded: bool = tex != null
+	var texture_create_ms: float = 0.0
+	if tex == null:
+		# Failure remains invisible; no synthesized 1×1 placeholder enters.
+		_perf_cover_finish_with_metrics(btn, false, queue_wait_ms, file_read_ms, decode_ms, 0.0)
+		return
+	_cover_texture_cache[path] = tex
+	var texture_assign_started_usec: int = Time.get_ticks_usec()
+	cover_rect.texture = tex
+	var texture_assign_ms: float = float(Time.get_ticks_usec() - texture_assign_started_usec) / 1000.0
+	btn.set_meta("cover_loaded", true)
+	lab_cover_samples_changed.emit()
+	if _crt_boot_generation != _perf_grid_generation:
+		_crt_show_final(btn)
+	var apply_ms: float = sync_fallback_ms + float(Time.get_ticks_usec() - apply_started_usec) / 1000.0
+	_perf_cover_finish_with_metrics(btn, perf_cover_loaded, queue_wait_ms, file_read_ms, decode_ms, apply_ms, 0.0, 0.0, 0.0, 0, 0, 0, 0, texture_create_ms, texture_assign_ms, 0.0, 0.0, plugin_load_elapsed_ms)
+
+func _perf_cover_finish_with_metrics(btn: Button, loaded: bool, queue_wait_ms: float, file_read_ms: float, decode_ms: float, apply_ms: float, image_decode_ms: float = 0.0, resize_ms: float = 0.0, mipmap_ms: float = 0.0, source_width: int = 0, source_height: int = 0, output_width: int = 0, output_height: int = 0, texture_create_ms: float = 0.0, texture_assign_ms: float = 0.0, animated_check_ms: float = 0.0, reveal_request_ms: float = 0.0, plugin_load_elapsed_ms: float = 0.0) -> void:
+	if not is_instance_valid(btn) or int(btn.get_meta("perf_cover_generation", -1)) != _perf_grid_generation:
+		_perf_cover_finished(btn, loaded)
+		return
+	_perf_cover_samples += 1
+	_perf_cover_queue_wait_total_ms += queue_wait_ms
+	_perf_cover_queue_wait_max_ms = maxf(_perf_cover_queue_wait_max_ms, queue_wait_ms)
+	_perf_cover_file_read_total_ms += file_read_ms
+	_perf_cover_file_read_max_ms = maxf(_perf_cover_file_read_max_ms, file_read_ms)
+	_perf_cover_decode_total_ms += decode_ms
+	_perf_cover_decode_max_ms = maxf(_perf_cover_decode_max_ms, decode_ms)
+	_perf_cover_apply_total_ms += apply_ms
+	_perf_cover_apply_max_ms = maxf(_perf_cover_apply_max_ms, apply_ms)
+	_perf_cover_image_decode_total_ms += image_decode_ms
+	_perf_cover_image_decode_max_ms = maxf(_perf_cover_image_decode_max_ms, image_decode_ms)
+	_perf_cover_resize_total_ms += resize_ms
+	_perf_cover_resize_max_ms = maxf(_perf_cover_resize_max_ms, resize_ms)
+	_perf_cover_mipmap_total_ms += mipmap_ms
+	_perf_cover_mipmap_max_ms = maxf(_perf_cover_mipmap_max_ms, mipmap_ms)
+	_perf_cover_texture_create_total_ms += texture_create_ms
+	_perf_cover_texture_create_max_ms = maxf(_perf_cover_texture_create_max_ms, texture_create_ms)
+	_perf_cover_texture_assign_total_ms += texture_assign_ms
+	_perf_cover_texture_assign_max_ms = maxf(_perf_cover_texture_assign_max_ms, texture_assign_ms)
+	_perf_cover_animated_check_total_ms += animated_check_ms
+	_perf_cover_animated_check_max_ms = maxf(_perf_cover_animated_check_max_ms, animated_check_ms)
+	_perf_cover_reveal_request_total_ms += reveal_request_ms
+	_perf_cover_reveal_request_max_ms = maxf(_perf_cover_reveal_request_max_ms, reveal_request_ms)
+	_perf_cover_plugin_load_elapsed_total_ms += plugin_load_elapsed_ms
+	_perf_cover_plugin_load_elapsed_max_ms = maxf(_perf_cover_plugin_load_elapsed_max_ms, plugin_load_elapsed_ms)
+	if source_width > 0 and source_height > 0 and output_width > 0 and output_height > 0:
+		_perf_cover_decoded_image_samples += 1
+		_perf_cover_source_pixels_total += source_width * source_height
+		_perf_cover_output_pixels_total += output_width * output_height
+		if source_width != output_width or source_height != output_height:
+			_perf_cover_resized_count += 1
+	var slow_stage_ms: float = maxf(file_read_ms, maxf(decode_ms, maxf(apply_ms, maxf(image_decode_ms, maxf(resize_ms, maxf(mipmap_ms, maxf(texture_create_ms, maxf(texture_assign_ms, maxf(animated_check_ms, reveal_request_ms)))))))))
+	if _perf_cover_stage_detail_logs < 8 and (_perf_cover_samples <= 3 or slow_stage_ms >= 12.0):
+		_perf_cover_stage_detail_logs += 1
+	_perf_cover_finished(btn, loaded)
+
+func _perf_cover_finished(btn: Button, loaded: bool) -> void:
+	_active_cover_loads = maxi(0, _active_cover_loads - 1)
+	_pump_cover_load_queue()
+	if not is_instance_valid(btn):
+		return
+	btn.set_meta("cover_load_pending", false)
+	if int(btn.get_meta("perf_cover_generation", -1)) != _perf_grid_generation:
+		return
+	# A failed decode must never reveal an empty card shell.
+	if not loaded and not bool(btn.get_meta("cover_loaded", false)):
+		btn.set_meta("crt_started", true)
+	_perf_grid_async_pending = maxi(0, _perf_grid_async_pending - 1)
+	if loaded and not _perf_grid_first_cover_logged:
+		_perf_grid_first_cover_logged = true
+
 
 func _check_animated(path: String, btn: Button) -> void:
 	var ext: String = path.get_extension().to_lower()
-	if ext == "webp" or ext == "gif" or ext == "apng":
-		if not ClassDB.class_exists(&"AnimatedImageLoader"):
-			return
-		var info = ClassDB.class_call_static(&"AnimatedImageLoader", &"probe_file", path)
-		if info != null and bool(info.get("animated", false)):
+	if ext != "webp" and ext != "gif" and ext != "apng":
+		return
+	if _animated_probe_cache.has(path):
+		if bool(_animated_probe_cache[path]):
 			btn.set_meta("anim_path", path)
+		return
+	var is_animated: bool = false
+	if ClassDB.class_exists(&"AnimatedImageLoader"):
+		var info = ClassDB.class_call_static(&"AnimatedImageLoader", &"probe_file", path)
+		if info != null:
+			is_animated = bool(info.get("animated", false))
+	_animated_probe_cache[path] = is_animated
+	if is_animated:
+		btn.set_meta("anim_path", path)
