@@ -9,8 +9,13 @@
 | [architecture.md](architecture.md) | 核心架构、数据模型、3D 卡片轴、海报墙物理、交互逻辑、扫描与刮削器、UI 规范与双缩放曲线、全局铁律 |
 | [history.md](history.md) | v0.6.0 到 v0.6.5 的演变史、字体系统、注入器及主要功能变更 |
 | [feature-status.md](feature-status.md) | 功能地图：游戏/电影/系统/UI 外壳的最新状态、近期修复与待验收项 |
-| [WB05_CRT_Array_Entrance_130ms.md](WB05_CRT_Array_Entrance_130ms.md) | 游戏封面 CRT / VHS 阵列入场：时序、图层、光效、设计决策与验收边界 |
-| [G3_交互实验室_可行性报告.md](G3_交互实验室_可行性报告.md) | COMICS 交互实验室：音效、Disc Loader 启动装置与 CRT Experiment A 颗粒化光栅原型的隔离边界和实现说明 |
+| [design/WB05_CRT_Array_Entrance_130ms.md](design/WB05_CRT_Array_Entrance_130ms.md) | 游戏封面 CRT / VHS 阵列入场：时序、图层、光效、设计决策与验收边界 |
+| [design/G3_交互实验室_可行性报告.md](design/G3_交互实验室_可行性报告.md) | COMICS 交互实验室：音效、Disc Loader 启动装置与 CRT Experiment A 颗粒化光栅原型的隔离边界和实现说明 |
+| [design/G3_Main_Decoupling.md](design/G3_Main_Decoupling.md) | 前端 `main.gd` 解耦过程与控制器职责划分 |
+| [design/G3_Archive_Space_02.md](design/G3_Archive_Space_02.md) | 档案空间 02 的布局与交互设计 |
+| [design/G3_启动动画专项研究报告.md](design/G3_启动动画专项研究报告.md) | 启动动画专项调研 |
+| [design/G3_启动动画第二阶段_品牌化设计方案.md](design/G3_启动动画第二阶段_品牌化设计方案.md) | 启动动画第二阶段品牌化设计 |
+| [design/G3_音效系统重启专项研究报告.md](design/G3_音效系统重启专项研究报告.md) | 音效系统重启专项调研 |
 
 ## 协作模式
 
